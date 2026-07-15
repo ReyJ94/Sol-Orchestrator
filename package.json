@@ -1,0 +1,22 @@
+{
+  "name": "opencode-sol-orchestrator",
+  "version": "0.1.0",
+  "description": "Managed child-worker orchestration tools and optional agent defaults for OpenCode.",
+  "repository": { "type": "git", "url": "git+https://github.com/ReyJ94/Sol-Orchestrator.git" },
+  "homepage": "https://github.com/ReyJ94/Sol-Orchestrator#readme",
+  "bugs": { "url": "https://github.com/ReyJ94/Sol-Orchestrator/issues" },
+  "license": "MIT",
+  "author": "reyj94",
+  "type": "module",
+  "exports": { "./server": "./server.js", "./compaction-snapshot": "./compaction-snapshot.js", "./tui": "./tui.tsx" },
+  "files": ["server.js", "compaction-snapshot.js", "orchestration-state.js", "orchestration-store.js", "tui.tsx", "agents.js", "agents", "assets", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test server.test.js orchestration-state.test.js orchestration-store.test.js test/compaction-snapshot.test.js && bun test tui.test.tsx",
+    "check": "node --check server.js && node --check compaction-snapshot.js && node --check orchestration-state.js && node --check orchestration-store.js && node --check agents.js && node --check server.test.js && node --check orchestration-state.test.js && node --check orchestration-store.test.js && node --check test/compaction-snapshot.test.js && tsc --project tsconfig.json",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "dependencies": { "@opencode-ai/plugin": "^1.18.1", "@opentui/solid": "0.4.3", "solid-js": "1.9.12" },
+  "devDependencies": { "typescript": "5.8.2" },
+  "engines": { "opencode": ">=1.18.1" },
+  "publishConfig": { "access": "public" }
+}
