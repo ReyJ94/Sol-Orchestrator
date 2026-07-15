@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { CompactionPlugin, OPERATIONAL_CHECKPOINT_PROMPT } from "../../opencode-compaction/server.js"
+import { CompactionPlugin, OPERATIONAL_CHECKPOINT_PROMPT } from "./fixtures/opencode-compaction-server.js"
 import { renderCompactionSnapshot } from "../compaction-snapshot.js"
 import { OrchestrationState } from "../orchestration-state.js"
 import { OrchestrationStore } from "../orchestration-store.js"
@@ -245,7 +245,7 @@ test("renders an encoded-safe emergency minimal record at the 1,024-character ha
   assert.deepEqual({ included_workers: data.included_workers, omitted_workers: data.omitted_workers, truncated: data.truncated }, { included_workers: 1, omitted_workers: 0, truncated: true })
 })
 
-test("composes the two actual canonical plugins in configured order exactly once", async () => temporaryDirectory(async (directory) => {
+test("composes the orchestrator snapshot with the compaction plugin contract exactly once", async () => temporaryDirectory(async (directory) => {
   const liveChild = child()
   const client = { session: {
     get: async () => ({ data: liveChild }), children: async () => ({ data: [liveChild] }), status: async () => ({ data: { [childID]: { type: "busy" } } }),
