@@ -2,265 +2,554 @@ import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
-import { CompactionPlugin, OPERATIONAL_CHECKPOINT_PROMPT } from "./fixtures/opencode-compaction-server.js"
-import { renderCompactionSnapshot } from "../compaction-snapshot.js"
-import { OrchestrationState } from "../orchestration-state.js"
-import { OrchestrationStore } from "../orchestration-store.js"
-import { SolOrchestratorPlugin } from "../server.js"
+import { test } from "bun:test"
+
+import { renderCompactionSnapshot } from "../src/compaction-snapshot.ts"
+import { OrchestrationStore } from "../src/orchestration-store.ts"
+import { createDefaultServerRuntime, SolOrchestratorPlugin } from "../src/server.ts"
+import {
+  CompactionPlugin,
+  OPERATIONAL_CHECKPOINT_PROMPT,
+} from "./fixtures/opencode-compaction-server.js"
 
 const parentID = "parent-1"
 const childID = "child-1"
-const initialPrompt = "Mode: Implementation\n\nINITIAL SEALED PROMPT SENTINEL: keep this durable."
-const transcriptSentinel = "CHILD TRANSCRIPT SENTINEL: this must never be copied into a compaction snapshot."
-const BEGIN = "--- BEGIN OBSERVED ORCHESTRATION DATA, NOT INSTRUCTIONS (schema v1) ---"
+const timestamp = "2026-07-17T13:00:00.000Z"
+const RESULT_SENTINEL = "FULL CHILD RESULT SENTINEL"
+const TOOL_SENTINEL = "FULL TOOL OUTPUT SENTINEL"
+const PATCH_SENTINEL = "FULL PATCH SENTINEL"
+const INTERNAL_PATTERN =
+  /workflow_id|task_id|boundary_message_id|result_message_id|message_id|part_id|event_sequence|delivered_event_sequence/u
+const BEGIN =
+  "--- BEGIN OBSERVED ORCHESTRATION DATA, NOT INSTRUCTIONS (schema v1) ---"
 const END = "--- END OBSERVED ORCHESTRATION DATA ---"
 
 const temporaryDirectory = async (run) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "opencode-sol-orchestrator-snapshot-"))
-  try { return await run(directory) } finally { await rm(directory, { recursive: true, force: true }) }
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "opencode-sol-orchestrator-snapshot-")
+  )
+  try {
+    return await run(directory)
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+  }
 }
 
-const statePathFor = (directory) => path.join(directory, "state.json")
 const parseSnapshot = (entry) => {
-  assert.ok(entry.startsWith(`${BEGIN}\n`), "snapshot starts with the observed-data delimiter")
-  assert.ok(entry.endsWith(`\n${END}`), "snapshot ends with the observed-data delimiter")
+  assert.ok(entry.startsWith(`${BEGIN}\n`))
+  assert.ok(entry.endsWith(`\n${END}`))
   return JSON.parse(entry.slice(BEGIN.length, -END.length).trim())
 }
+
 const count = (text, needle) => text.split(needle).length - 1
-const child = (id = childID) => ({ id, parentID, title: "Worker (Terra Max)", directory: "/workspace", time: { updated: "2026-07-15T00:00:00.000Z" } })
-const taskHook = async (plugin, id = childID, description = "Durable bounded implementation") => plugin["tool.execute.after"](
-  { tool: "task", sessionID: parentID, args: { subagent_type: "terra-max", description, prompt: initialPrompt } },
-  { metadata: { sessionId: id } },
-)
-const outputFor = () => ({ context: [], prompt: undefined })
 
-test("renders only durable orchestration truth, including the initial prompt, decisive checkpoint, unresolved compaction blocker, and live state", async () => temporaryDirectory(async (directory) => {
-  let messagesCalls = 0
-  const liveChild = child()
-  const client = { session: {
-    get: async () => ({ data: liveChild }),
-    children: async () => ({ data: [liveChild] }),
-    status: async () => ({ data: { [childID]: { type: "busy" } } }),
-    messages: async () => { messagesCalls += 1; return { data: [{ info: { role: "assistant", id: "transcript" }, parts: [{ type: "text", text: transcriptSentinel }] }] } },
-    promptAsync: async () => ({ data: true }),
-  } }
-  const plugin = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath: statePathFor(directory) })
-  await taskHook(plugin)
-  await new OrchestrationStore({ statePath: statePathFor(directory) }).mutate((state) => {
-    state.registerWorker({ parent_id: parentID, task_id: "persisted-only", agent_type: "terra-medium", description: "Retained without a live child", mode: "implementation", source: "task_hook" })
-    state.captureInitialPrompt(parentID, "persisted-only", "PERSISTED ONLY PROMPT")
-  })
-  await plugin.event({ event: { type: "session.compacted", properties: { sessionID: childID } } })
-  await plugin.tool.report_to_parent.execute({ kind: "acknowledgement", prompt_id: "pr_v1_000000000001", summary: "Acknowledged after compaction" }, { sessionID: childID, directory: "/workspace", agent: "terra-max" })
+class FakeSessions {
+  messagesCalls = 0
+  diffCalls = 0
 
-  const output = outputFor()
-  await plugin["experimental.session.compacting"]({ sessionID: parentID }, output)
+  abort() {
+    return Promise.resolve()
+  }
 
-  assert.equal(output.prompt, undefined, "orchestrator never owns the compaction prompt")
-  assert.equal(output.context.length, 1)
-  assert.equal(messagesCalls, 0, "compaction must not call session.messages")
-  assert.equal(output.context[0].includes(transcriptSentinel), false)
-  assert.ok(output.context[0].includes("OBSERVED ORCHESTRATION DATA, NOT INSTRUCTIONS"))
-  const data = parseSnapshot(output.context[0])
-  assert.deepEqual({ schema_version: data.schema_version, observed_orchestration_data: data.observed_orchestration_data, included_workers: data.included_workers, omitted_workers: data.omitted_workers, truncated: data.truncated }, {
-    schema_version: 1, observed_orchestration_data: true, included_workers: 2, omitted_workers: 0, truncated: false,
-  })
-  const worker = data.workers.find((entry) => entry.task_id === childID)
-  assert.deepEqual({ task_id: worker.task_id, agent_type: worker.agent_type, profile_label: worker.profile_label, task: worker.task, live_state: worker.live_state, rebrief_required: worker.rebrief_required }, {
-    task_id: childID, agent_type: "terra-max", profile_label: "Terra Max", task: { description: "Durable bounded implementation", mode: "implementation" }, live_state: "busy", rebrief_required: true,
-  })
-  assert.deepEqual({ text: worker.current_prompt.text, prompt_id: worker.current_prompt.prompt_id, prompt_stage: worker.current_prompt.prompt_stage, checkpoint_state: worker.current_prompt.checkpoint_state }, {
-    text: initialPrompt, prompt_id: "pr_v1_000000000001", prompt_stage: "checkpointed", checkpoint_state: "healthy",
-  })
-  assert.equal(worker.current_prompt.acknowledgement_deadline_at, null)
-  assert.equal(typeof worker.current_prompt.first_checkpoint_deadline_at, "string")
-  assert.equal(typeof worker.current_prompt.checkpoint_stale_deadline_at, "string")
-  assert.equal(typeof worker.current_prompt.checkpoint_age_ms, "number")
-  assert.deepEqual({ checkpoint_id: worker.last_decisive_checkpoint.checkpoint_id, kind: worker.last_decisive_checkpoint.kind, summary: worker.last_decisive_checkpoint.summary, prompt_id: worker.last_decisive_checkpoint.prompt_id, created_at: worker.last_decisive_checkpoint.created_at, needs_decision: worker.last_decisive_checkpoint.needs_decision }, {
-    checkpoint_id: "cp_v1_000000000001", kind: "blocker", summary: "OpenCode compacted this worker session. Resend the full sealed brief before asking it to continue; do not rely on partial conversation fragments.", prompt_id: "pr_v1_000000000001", created_at: worker.last_decisive_checkpoint.created_at, needs_decision: true,
-  })
-  assert.ok(worker.last_decisive_checkpoint.summary.length <= 1_000)
-  assert.equal(typeof worker.last_decisive_checkpoint.created_at, "string")
-  assert.deepEqual({ checkpoint_id: worker.unresolved_checkpoint.checkpoint_id, kind: worker.unresolved_checkpoint.kind, needs_decision: worker.unresolved_checkpoint.needs_decision }, {
-    checkpoint_id: worker.last_decisive_checkpoint.checkpoint_id, kind: "blocker", needs_decision: true,
-  })
-  const persistedOnly = data.workers.find((entry) => entry.task_id === "persisted-only")
-  assert.deepEqual({ task_id: persistedOnly.task_id, agent_type: persistedOnly.agent_type, profile_label: persistedOnly.profile_label, live_state: persistedOnly.live_state, task: persistedOnly.task }, {
-    task_id: "persisted-only", agent_type: "terra-medium", profile_label: "Terra Medium", live_state: "unavailable", task: { description: "Retained without a live child", mode: "implementation" },
-  })
-}))
+  appendPermissions() {
+    return Promise.resolve()
+  }
 
-test("successful rebrief admission clears and durably preserves unresolved and rebrief state", async () => temporaryDirectory(async (directory) => {
-  const statePath = statePathFor(directory)
-  const liveChild = child()
-  const client = { session: {
-    get: async () => ({ data: liveChild }), children: async () => ({ data: [liveChild] }), status: async () => ({ data: { [childID]: { type: "busy" } } }),
-    messages: async () => ({ data: [] }), promptAsync: async () => ({ data: true }),
-  } }
-  const created = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath })
-  await taskHook(created)
-  await created.event({ event: { type: "session.compacted", properties: { sessionID: childID } } })
-  await created.tool.agents_send.execute({ task_id: childID, message: "FULL REBRIEF FOLLOW-UP TEXT" }, { sessionID: parentID, directory: "/workspace" })
+  diff() {
+    this.diffCalls += 1
+    return Promise.resolve([])
+  }
 
-  const restored = new OrchestrationStore({ statePath })
-  const durable = await restored.read((state) => ({ prompt: state.currentPrompt(parentID, childID), unresolved: state.unresolvedCheckpoint(parentID, childID), rebrief: state.rebriefRequired(parentID, childID) }))
-  assert.equal(durable.prompt.text, "FULL REBRIEF FOLLOW-UP TEXT")
-  assert.equal(durable.unresolved, null)
-  assert.equal(durable.rebrief, false)
+  get(sessionID) {
+    return Promise.resolve({
+      directory: "/workspace",
+      id: sessionID,
+      parentID,
+      projectID: "project-1",
+      time: { created: 1, updated: 1 },
+      title: "worker",
+      version: "1.18.1",
+    })
+  }
 
-  const restarted = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath })
-  const output = outputFor()
-  await restarted["experimental.session.compacting"]({ sessionID: parentID }, output)
-  const worker = parseSnapshot(output.context[0]).workers[0]
-  assert.equal(worker.current_prompt.text, "FULL REBRIEF FOLLOW-UP TEXT")
-  assert.equal(worker.unresolved_checkpoint, null)
-  assert.equal(worker.rebrief_required, false)
-}))
+  message() {
+    return Promise.reject(new Error("Compaction must not read a child message."))
+  }
 
-test("uses deterministic valid-JSON bounds, prioritizes workers, omits lower priority records, and appends only once", async () => temporaryDirectory(async (directory) => {
-  const statePath = statePathFor(directory)
-  const store = new OrchestrationStore({ statePath, now: () => "2026-07-15T00:00:00.000Z" })
-  const ids = ["urgent", ...Array.from({ length: 13 }, (_value, index) => `worker-${index}`)]
-  await store.mutate((state) => {
-    for (const id of ids) {
-      state.registerWorker({ parent_id: parentID, task_id: id, agent_type: "terra-max", description: `${id} ${"description ".repeat(100)}`, mode: "implementation", source: "task_hook" })
-      state.captureInitialPrompt(parentID, id, `${id} ${"prompt ".repeat(400)}`)
-    }
-    state.deliver(parentID, { task_id: "urgent", kind: "blocker", summary: "Needs a rebrief immediately.", files: [], needs_decision: true, rebrief_required: true })
+  messages() {
+    this.messagesCalls += 1
+    return Promise.resolve([])
+  }
+
+  permissions() {
+    return Promise.resolve([])
+  }
+
+  replyPermission() {
+    return Promise.resolve()
+  }
+
+  status() {
+    return Promise.resolve({ [childID]: { type: "busy" } })
+  }
+}
+
+const seedRuntime = async (directory) => {
+  const store = new OrchestrationStore({
+    now: () => timestamp,
+    statePath: path.join(directory, "state-v2.json"),
   })
-  const children = ids.map((id) => child(id))
-  const client = { session: {
-    children: async () => ({ data: children }), status: async () => ({ data: Object.fromEntries(ids.map((id) => [id, { type: "idle" }])) }),
-    get: async ({ path: requestPath }) => ({ data: children.find((entry) => entry.id === requestPath.id) }), messages: async () => { throw new Error("snapshot must not read messages") },
-  } }
-  const plugin = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath, compactionSnapshotMaxChars: 1024 })
-  const output = outputFor()
-  await plugin["experimental.session.compacting"]({ sessionID: parentID }, output)
-  await plugin["experimental.session.compacting"]({ sessionID: parentID }, output)
-  assert.equal(output.context.length, 1, "the same output receives only one orchestrator snapshot")
-  assert.ok(output.context[0].length <= 1024)
-  const data = parseSnapshot(output.context[0])
-  assert.equal(data.included_workers + data.omitted_workers, ids.length)
+  await store.mutateWorkflow((workflow) => {
+    workflow.start({
+      definition: {
+        objective: "Preserve semantic orchestration continuity.",
+        steps: [
+          {
+            dependsOn: [],
+            jobs: [
+              {
+                actor: { profile: "luna-max", type: "worker" },
+                dependsOn: [],
+                mode: "verification",
+                name: "inspect bounded worker state",
+                objective: "Inspect only selected worker content.",
+              },
+            ],
+            name: "inspect",
+            objective: "Keep compaction metadata-only.",
+          },
+        ],
+      },
+      orchestrator_agent_id: "sol",
+      parent_session_id: parentID,
+      workflow_id: "workflow-internal-1",
+    })
+    workflow.markWorkerActive({
+      job: "inspect bounded worker state",
+      task_id: childID,
+      workflow_id: "workflow-internal-1",
+    })
+  })
+  await store.mutateRoot(({ root }) => {
+    root.job_runs.push({
+      job: "inspect bounded worker state",
+      result_available: false,
+      run_sequence: 1,
+      started_at: timestamp,
+      state: "active",
+      task_id: childID,
+      updated_at: timestamp,
+      workflow_id: "workflow-internal-1",
+      workflow_version: 1,
+      write_grants: [],
+    })
+    root.workers.push({
+      child_session_id: childID,
+      created_at: timestamp,
+      delivered_event_sequence: 0,
+      job: "inspect bounded worker state",
+      latest_event: {
+        created_at: timestamp,
+        kind: "progress",
+        message: "The metadata seam is established.",
+        sequence: 1,
+      },
+      live_state: "busy",
+      mode: "verification",
+      parent_session_id: parentID,
+      profile: "luna-max",
+      run_sequence: 1,
+      task_id: childID,
+      updated_at: timestamp,
+      workflow_id: "workflow-internal-1",
+      workflow_version: 1,
+    })
+    root.turns.push({
+      boundary_message_id: "user-internal-1",
+      completed_at: timestamp,
+      files: [
+        {
+          additions: 2,
+          attributed: false,
+          deletions: 1,
+          end_sha256: "a".repeat(64),
+          path: "src/a.ts",
+          status: "modified",
+        },
+      ],
+      mutation_epochs: [],
+      post_undo_hashes: [],
+      result_available: true,
+      result_message_id: "assistant-internal-1",
+      run_sequence: 1,
+      started_at: timestamp,
+      task_id: childID,
+      tool_outputs: [
+        {
+          message_id: "assistant-tool-internal-1",
+          ordinal: 1,
+          output_available: true,
+          part_id: "part-internal-1",
+          status: "completed",
+          title: "Read source",
+          tool: "read",
+        },
+      ],
+      turn: 1,
+      undo_state: "unavailable",
+      undo_unavailable_reason: "Mutation provenance is not established.",
+    })
+  })
+  const sessions = new FakeSessions()
+  const runtime = createDefaultServerRuntime({
+    client: { session: {} },
+    directory: "/workspace",
+    options: { sessionAdapter: sessions, store },
+  })
+  return { runtime, sessions }
+}
+
+const seedGoalOnlyRuntime = async (directory) => {
+  const store = new OrchestrationStore({
+    now: () => timestamp,
+    statePath: path.join(directory, "state-v2.json"),
+  })
+  await store.mutateGoal((goal) => {
+    goal.start({
+      goal_id: "goal-internal-1",
+      objective: "Finish the real outcome across however many workflows are needed.",
+      orchestrator_agent_id: "sol",
+      parent_session_id: parentID,
+    })
+  })
+  const sessions = new FakeSessions()
+  const runtime = createDefaultServerRuntime({
+    client: { session: {} },
+    directory: "/workspace",
+    options: { sessionAdapter: sessions, store },
+  })
+  return { runtime, sessions }
+}
+
+test("renders only semantic workflow and worker metadata", () => {
+  const rendered = renderCompactionSnapshot({
+    workers: [
+      {
+        boundary_message_id: "hidden-boundary",
+        job: "inspect bounded worker state",
+        latest_event: {
+          event_sequence: 7,
+          kind: "progress",
+          message: "Bounded progress.",
+        },
+        live_state: "busy",
+        mode: "verification",
+        patch: PATCH_SENTINEL,
+        profile: "luna-max",
+        result: RESULT_SENTINEL,
+        result_available: true,
+        task_id: childID,
+        tool_output: TOOL_SENTINEL,
+        turn_count: 1,
+        turns: [
+          {
+            completed: true,
+            files: [
+              {
+                additions: 2,
+                deletions: 1,
+                path: "src/a.ts",
+                status: "modified",
+              },
+            ],
+            isolated: false,
+            result_available: true,
+            tool_outputs: [
+              {
+                output_available: true,
+                status: "completed",
+                title: "Read source",
+                tool: "read",
+                tool_number: 1,
+              },
+            ],
+            turn: 1,
+            undo_available: false,
+            undo_unavailable_reason: "Mutation provenance is not established.",
+          },
+        ],
+      },
+    ],
+    workflow: {
+      current: {
+        objective: "Preserve semantic orchestration continuity.",
+        state: "active",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { profile: "luna-max", type: "worker" },
+                mode: "verification",
+                name: "inspect bounded worker state",
+                objective: "Inspect only selected worker content.",
+                result_available: true,
+                state: "review",
+                task_id: childID,
+              },
+            ],
+            name: "inspect",
+            objective: "Keep compaction metadata-only.",
+            state: "active",
+          },
+        ],
+      },
+      available_actions: [],
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.equal(data.observed_orchestration_data, true)
+  assert.equal(data.schema_version, 1)
+  assert.equal(data.workflow.objective, "Preserve semantic orchestration continuity.")
+  assert.equal(data.workers[0].turns[0].files[0].path, "src/a.ts")
+  const serialized = JSON.stringify(data)
+  assert.doesNotMatch(serialized, INTERNAL_PATTERN)
+  assert.equal(serialized.includes(RESULT_SENTINEL), false)
+  assert.equal(serialized.includes(TOOL_SENTINEL), false)
+  assert.equal(serialized.includes(PATCH_SENTINEL), false)
+})
+
+test("retains exact available semantic actions without protocol identifiers", () => {
+  const rendered = renderCompactionSnapshot({
+    workflow: {
+      current: {
+        objective: "Complete the semantic cutover.",
+        state: "blocked",
+        steps: [],
+      },
+      available_actions: [
+        {
+          args: { jobs: ["inspect bounded worker state"], until: "any" },
+          tool: "agents_wait",
+        },
+        {
+          args: { job: "integrate result" },
+          needs: ["message"],
+          tool: "workflow_complete",
+        },
+      ],
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.deepEqual(data.workflow.available_actions, [
+    {
+      args: { jobs: ["inspect bounded worker state"], until: "any" },
+      tool: "agents_wait",
+    },
+    {
+      args: { job: "integrate result" },
+      needs: ["message"],
+      tool: "workflow_complete",
+    },
+  ])
+  assert.doesNotMatch(JSON.stringify(data), INTERNAL_PATTERN)
+})
+
+test("never presents a silently partial action surface after compaction", () => {
+  const availableActions = Array.from({ length: 20 }, (_value, index) => ({
+    args: { job: `semantic job ${index}` },
+    needs: ["message"],
+    tool: "agents_send",
+  }))
+  const complete = parseSnapshot(
+    renderCompactionSnapshot({
+      maxChars: 100_000,
+      workflow: {
+        available_actions: availableActions,
+        current: {
+          objective: "Preserve every currently executable semantic action.",
+          state: "active",
+          steps: [],
+        },
+      },
+    })
+  )
+  assert.deepEqual(complete.workflow.available_actions, availableActions)
+  assert.equal(complete.workflow.available_actions_refresh_required, undefined)
+
+  const bounded = parseSnapshot(
+    renderCompactionSnapshot({
+      maxChars: 1024,
+      workflow: {
+        available_actions: availableActions,
+        current: {
+          objective: "x".repeat(1000),
+          state: "active",
+          steps: [],
+        },
+      },
+    })
+  )
+  assert.deepEqual(bounded.workflow.available_actions, [])
+  assert.equal(bounded.workflow.available_actions_refresh_required, true)
+})
+
+test("retains a durable goal between workflows without internal identity", () => {
+  const rendered = renderCompactionSnapshot({
+    workflow: {
+      available_actions: [
+        {
+          args: {},
+          needs: ["objective", "steps"],
+          tool: "workflow_start",
+        },
+      ],
+      current: null,
+      goal: {
+        goal_id: "must-not-leak",
+        objective: "Finish the real user outcome across later workflows.",
+        status: "active",
+      },
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.deepEqual(data.workflow.goal, {
+    objective: "Finish the real user outcome across later workflows.",
+    status: "active",
+  })
+  assert.equal(data.workflow.objective, undefined)
+  assert.doesNotMatch(JSON.stringify(data), /must-not-leak|goal_id/u)
+})
+
+test("produces deterministic valid JSON within configured bounds", () => {
+  const workers = Array.from({ length: 20 }, (_value, index) => ({
+    job: `worker job ${index} ${"x".repeat(200)}`,
+    latest_event: {
+      kind: index === 19 ? "blocker" : "progress",
+      message: `${index} ${"bounded ".repeat(200)}`,
+    },
+    live_state: index === 19 ? "blocked" : "busy",
+    mode: "research",
+    profile: "luna-medium",
+    result_available: false,
+    task_id: `child-${index}`,
+    turn_count: 0,
+    turns: [],
+  }))
+  const first = renderCompactionSnapshot({ maxChars: 1024, workers })
+  const second = renderCompactionSnapshot({ maxChars: 1024, workers })
+
+  assert.equal(first, second)
+  assert.ok(first.length <= 1024)
+  const data = parseSnapshot(first)
+  assert.equal(data.truncated, true)
   assert.ok(data.included_workers >= 1)
   assert.ok(data.omitted_workers > 0)
-  assert.equal(data.truncated, true)
-  assert.equal(data.workers[0].task_id, "urgent", "rebrief-required worker wins bounded selection")
-
-  const defaultPlugin = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath })
-  const defaultOutput = outputFor()
-  await defaultPlugin["experimental.session.compacting"]({ sessionID: parentID }, defaultOutput)
-  assert.ok(defaultOutput.context[0].length <= 12_000)
+  assert.match(data.workers[0].job, /^worker job 19/u)
   for (const invalid of [1023, 100_001, 1.5]) {
-    await assert.rejects(SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath, compactionSnapshotMaxChars: invalid }), /compactionSnapshotMaxChars/)
+    assert.throws(
+      () => renderCompactionSnapshot({ maxChars: invalid, workers }),
+      /compactionSnapshotMaxChars/u
+    )
   }
-}))
-
-test("does not append for a parent with no managed workers and never takes prompt ownership", async () => temporaryDirectory(async (directory) => {
-  const plugin = await SolOrchestratorPlugin({ directory: "/workspace", client: { session: { children: async () => ({ data: [] }), status: async () => ({ data: {} }) } } }, { statePath: statePathFor(directory) })
-  const output = { context: ["existing context"], prompt: undefined }
-  await plugin["experimental.session.compacting"]({ sessionID: parentID }, output)
-  assert.deepEqual(output, { context: ["existing context"], prompt: undefined })
-}))
-
-test("migrates schema-v2 snapshots, preserves schema-v3 prompt and decision truth, and rejects invalid durable semantics", () => {
-  const state = new OrchestrationState({ now: () => "2026-07-15T00:00:00.000Z" })
-  state.registerWorker({ parent_id: parentID, task_id: childID, agent_type: "terra-max", description: "Migration worker", mode: "implementation", source: "task_hook" })
-  state.captureInitialPrompt(parentID, childID, "Initial durable text")
-  const reservation = state.reservePrompt(parentID, childID, "Reserved durable text")
-  state.deliver(parentID, { task_id: childID, kind: "blocker", summary: "Need decision", files: [], needs_decision: true, rebrief_required: true })
-  const current = state.snapshot()
-  assert.equal(current.schema_version, 3)
-  assert.equal(current.tasks[0].prompt.text, "Initial durable text")
-  assert.equal(current.reservations[0].text, "Reserved durable text")
-  assert.equal(current.tasks[0].rebrief_required, true)
-
-  const v2 = structuredClone(current)
-  v2.schema_version = 2
-  delete v2.tasks[0].prompt.text
-  delete v2.tasks[0].unresolved_checkpoint_id
-  delete v2.tasks[0].rebrief_required
-  delete v2.reservations[0].text
-  delete v2.checkpoints[0].checkpoint.rebrief_required
-  const migrated = OrchestrationState.restore(v2, { now: () => "2026-07-15T00:00:00.000Z" })
-  assert.equal(migrated.currentPrompt(parentID, childID).text, "")
-  assert.equal(migrated.unresolvedCheckpoint(parentID, childID), null)
-  assert.equal(migrated.rebriefRequired(parentID, childID), false)
-  assert.equal(migrated.snapshot().schema_version, 3)
-
-  const invalidUnresolved = structuredClone(current)
-  invalidUnresolved.tasks[0].unresolved_checkpoint_id = "cp_v1_000000000999"
-  assert.throws(() => OrchestrationState.restore(invalidUnresolved), /unresolved|checkpoint/i)
-  const invalidRebrief = structuredClone(current)
-  invalidRebrief.tasks[0].unresolved_checkpoint_id = null
-  assert.throws(() => OrchestrationState.restore(invalidRebrief), /rebrief/i)
-  const invalidText = structuredClone(current)
-  invalidText.tasks[0].prompt.text = "x".repeat(8001)
-  assert.throws(() => OrchestrationState.restore(invalidText), /prompt text/i)
-  assert.equal(reservation.prompt_id, "pr_v1_000000000002")
 })
 
-test("caps durable initial and reserved prompt text deterministically and clears unresolved rebrief on non-decision completion", () => {
-  const state = new OrchestrationState({ now: () => "2026-07-15T00:00:00.000Z" })
-  const oversized = "x".repeat(8_100)
-  state.registerTask(parentID, childID)
-  state.captureInitialPrompt(parentID, childID, oversized)
-  const initial = state.currentPrompt(parentID, childID)
-  assert.equal(initial.text.length, 8_000)
-  assert.ok(initial.text.endsWith("\n[... prompt text truncated ...]"))
-  const reserved = state.reservePrompt(parentID, childID, oversized)
-  state.admitPrompt(parentID, childID, reserved)
-  assert.equal(state.currentPrompt(parentID, childID).text, initial.text)
-  assert.equal(OrchestrationState.restore(state.snapshot()).currentPrompt(parentID, childID).text, initial.text)
+test("server compaction appends one persisted metadata snapshot without reading child history", async () =>
+  temporaryDirectory(async (directory) => {
+    const { runtime, sessions } = await seedRuntime(directory)
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    )
+    const compact = plugin["experimental.session.compacting"]
+    assert.equal(typeof compact, "function")
+    const callsBefore = {
+      diff: sessions.diffCalls,
+      messages: sessions.messagesCalls,
+    }
+    const output = { context: [], prompt: undefined }
 
-  state.deliver(parentID, { task_id: childID, kind: "blocker", summary: "Rebrief first", files: [], needs_decision: true, rebrief_required: true })
-  assert.equal(state.rebriefRequired(parentID, childID), true)
-  assert.notEqual(state.unresolvedCheckpoint(parentID, childID), null)
-  state.deliver(parentID, { task_id: childID, kind: "completion", summary: "Finished without a decision", files: [], needs_decision: false })
-  assert.equal(state.rebriefRequired(parentID, childID), false)
-  assert.equal(state.unresolvedCheckpoint(parentID, childID), null)
-})
+    await compact({ sessionID: parentID }, output)
+    await compact({ sessionID: parentID }, output)
 
-test("renders an encoded-safe emergency minimal record at the 1,024-character hard minimum", () => {
-  const escapingIdentity = '"\\'.repeat(80)
-  const escapingState = '"\\'.repeat(40)
-  const rendered = renderCompactionSnapshot({
-    maxChars: 1_024,
-    workers: [{
-      task_id: escapingIdentity,
-      agent_type: escapingIdentity,
-      profile_label: escapingIdentity,
-      description: "ordinary description",
-      mode: "implementation",
-      live_state: escapingState,
-      current_prompt: null,
-      last_decisive_checkpoint: null,
-      unresolved_checkpoint: null,
-      rebrief_required: false,
-    }],
-  })
-  assert.equal(typeof rendered, "string")
-  assert.ok(rendered.length <= 1_024)
-  const data = parseSnapshot(rendered)
-  assert.deepEqual({ included_workers: data.included_workers, omitted_workers: data.omitted_workers, truncated: data.truncated }, { included_workers: 1, omitted_workers: 0, truncated: true })
-})
+    assert.equal(output.prompt, undefined)
+    assert.equal(output.context.length, 1)
+    assert.deepEqual(
+      { diff: sessions.diffCalls, messages: sessions.messagesCalls },
+      callsBefore
+    )
+    const data = parseSnapshot(output.context[0])
+    assert.equal(data.workflow.objective, "Preserve semantic orchestration continuity.")
+    assert.equal(data.workers[0].job, "inspect bounded worker state")
+    assert.equal(data.workers[0].turns[0].tool_outputs[0].tool_number, 1)
+    assert.doesNotMatch(JSON.stringify(data), INTERNAL_PATTERN)
+  }))
 
-test("composes the orchestrator snapshot with the compaction plugin contract exactly once", async () => temporaryDirectory(async (directory) => {
-  const liveChild = child()
-  const client = { session: {
-    get: async () => ({ data: liveChild }), children: async () => ({ data: [liveChild] }), status: async () => ({ data: { [childID]: { type: "busy" } } }),
-    messages: async () => ({ data: [] }),
-  } }
-  const orchestrator = await SolOrchestratorPlugin({ client, directory: "/workspace" }, { statePath: statePathFor(directory) })
-  await taskHook(orchestrator)
-  const compaction = await CompactionPlugin()
-  const output = outputFor()
-  await orchestrator["experimental.session.compacting"]({ sessionID: parentID }, output)
-  const sentinel = output.context[0]
-  assert.equal(output.context.length, 1)
-  assert.equal(output.prompt, undefined)
-  await compaction["experimental.session.compacting"]({ sessionID: parentID }, output)
-  assert.equal(output.context.length, 1)
-  assert.equal(count(output.prompt, sentinel), 1)
-  assert.equal(count(output.prompt, OPERATIONAL_CHECKPOINT_PROMPT), 1)
-}))
+test("server compaction retains the active goal between workflows", async () =>
+  temporaryDirectory(async (directory) => {
+    const { runtime, sessions } = await seedGoalOnlyRuntime(directory)
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    )
+    const messageCallsBeforeCompaction = sessions.messagesCalls
+    const output = { context: [], prompt: undefined }
+
+    await plugin["experimental.session.compacting"](
+      { sessionID: parentID },
+      output
+    )
+
+    assert.equal(output.context.length, 1)
+    assert.equal(sessions.messagesCalls, messageCallsBeforeCompaction)
+    const data = parseSnapshot(output.context[0])
+    assert.deepEqual(data.workflow.goal, {
+      objective: "Finish the real outcome across however many workflows are needed.",
+      status: "active",
+    })
+    assert.equal(data.workflow.current, undefined)
+    assert.doesNotMatch(JSON.stringify(data), /goal-internal-1|goal_id/u)
+  }))
+
+test("server compaction leaves an unrelated empty parent untouched", async () =>
+  temporaryDirectory(async (directory) => {
+    const { runtime } = await seedRuntime(directory)
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    )
+    const output = { context: ["existing"], prompt: undefined }
+
+    await plugin["experimental.session.compacting"](
+      { sessionID: "other-parent" },
+      output
+    )
+
+    assert.deepEqual(output, { context: ["existing"], prompt: undefined })
+  }))
+
+test("composes with OpenCode checkpoint compaction without prompt duplication", async () =>
+  temporaryDirectory(async (directory) => {
+    const { runtime } = await seedRuntime(directory)
+    const orchestrator = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    )
+    const compaction = await CompactionPlugin()
+    const output = { context: [], prompt: undefined }
+
+    await orchestrator["experimental.session.compacting"](
+      { sessionID: parentID },
+      output
+    )
+    await compaction["experimental.session.compacting"](
+      { sessionID: parentID },
+      output
+    )
+
+    assert.equal(output.context.length, 1)
+    assert.equal(count(output.prompt, OPERATIONAL_CHECKPOINT_PROMPT), 1)
+    assert.equal(count(output.prompt, BEGIN), 1)
+  }))

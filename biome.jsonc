@@ -1,0 +1,77 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": ["ultracite/biome/core"],
+  "files": {
+    "includes": [
+      "src/**",
+      "test/**/*.ts",
+      "test/**/*.tsx",
+      "*.ts",
+      "*.tsx",
+      "*.json",
+      "*.jsonc",
+      "!.opencode"
+    ]
+  },
+  "linter": {
+    "rules": {
+      "style": {
+        "noNamespace": "off",
+        "useConsistentTypeDefinitions": {
+          "level": "error",
+          "options": {
+            "style": "type"
+          }
+        },
+        "useFilenamingConvention": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.js"],
+      "linter": { "enabled": false },
+      "formatter": { "enabled": false },
+      "assist": { "enabled": false }
+    },
+    {
+      "includes": ["src/tui.tsx"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noStaticElementInteractions": "off",
+            "useKeyWithMouseEvents": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["tui.test.tsx"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noStaticElementInteractions": "off",
+            "useKeyWithMouseEvents": "off"
+          },
+          "complexity": { "noVoid": "off" },
+          "style": {
+            "noNestedTernary": "off",
+            "useBlockStatements": "off"
+          },
+          "suspicious": { "useAwait": "off" }
+        }
+      }
+    },
+    {
+      "includes": ["tui.test.tsx"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noEmptyBlockStatements": "off",
+            "noEvolvingTypes": "off"
+          }
+        }
+      }
+    }
+  ]
+}

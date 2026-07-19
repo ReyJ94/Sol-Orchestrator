@@ -1,58 +1,136 @@
 /** @jsxImportSource @opentui/solid */
-import assert from "node:assert/strict"
-import { test } from "bun:test"
-import { createSlot, createSolidSlotRegistry, testRender, useRenderer } from "@opentui/solid"
 
-const { SolOrchestratorTuiPlugin } = await import("./tui.tsx")
+import { afterEach, expect, test } from "bun:test";
+import { testRender } from "@opentui/solid";
 
-function createApi({ children = [], restored = false, error, statuses = {}, theme = {} } = {}) {
-  const slots = []
-  const layers = []
-  const dialogs = []
-  const navigations = []
-  const writes = []
-  const childrenCalls = []
-  const cleanups = []
-  let eventDisposals = 0
-  let layerDisposals = 0
+const { createSolOrchestratorTuiPlugin } = await import("./src/tui.tsx");
 
-  return {
-    slots,
-    layers,
-    dialogs,
-    navigations,
-    writes,
-    childrenCalls,
-    cleanups,
-    get eventDisposals() {
-      return eventDisposals
-    },
-    get layerDisposals() {
-      return layerDisposals
-    },
-    api: {
-      slots: { register: (slot) => slots.push(slot) },
-      keymap: {
-        registerLayer(layer) {
-          layers.push(layer)
-          return () => {
-            layerDisposals += 1
-          }
+let rendered: Awaited<ReturnType<typeof testRender>> | undefined;
+
+afterEach(() => {
+  rendered?.renderer.destroy();
+  rendered = undefined;
+});
+
+const workflow = ({
+  state = "active",
+  jobState = "ready",
+  liveState,
+  latestEvent,
+  resultAvailable = false,
+  availableActions = [{ args: {}, tool: "workflow_delegate" }],
+} = {}) => ({
+  available_actions: availableActions,
+  objective: "Ship the simplified orchestration pipeline.",
+  state,
+  steps: [
+    {
+      jobs: [
+        {
+          actor: { profile: "luna-medium", type: "worker" },
+          latest_event: latestEvent,
+          live_state: liveState,
+          mode: "verification",
+          name: "verify simplified boundary",
+          objective: "Verify the final public seam.",
+          result_available: resultAvailable,
+          state: jobState,
+          turns:
+            liveState === "review"
+              ? [
+                  {
+                    files: [
+                      {
+                        additions: 3,
+                        deletions: 1,
+                        path: "src/tui.tsx",
+                        status: "modified",
+                      },
+                    ],
+                    isolated: true,
+                    result_available: true,
+                    turn: 1,
+                    undo_available: true,
+                  },
+                ]
+              : [],
         },
-      },
+      ],
+      name: "verify",
+      objective: "Prove the final projection.",
+      state,
+    },
+  ],
+  version: 2,
+});
+
+const goalBetweenWorkflows = () => ({
+  available_actions: [
+    {
+      args: {},
+      needs: ["objective", "steps"],
+      tool: "workflow_start",
+    },
+  ],
+  goal: {
+    objective: "Deliver the full outcome across bounded workflows.",
+    status: "active",
+  },
+  objective: "Deliver the full outcome across bounded workflows.",
+  state: "active",
+  steps: [],
+  version: null,
+});
+
+function createApi({ children = [], readError, statuses = {} } = {}) {
+  const slots = [];
+  const layers = [];
+  const dialogs = [];
+  const navigations = [];
+  const eventHandlers = new Map();
+  const cleanups = [];
+  return {
+    api: {
       client: {
         session: {
-          children: async (input) => {
-            childrenCalls.push(input)
-            if (error) throw error
-            return { data: children }
+          children: async () => {
+            if (readError) throw readError;
+            return { data: children };
           },
+        },
+      },
+      event: {
+        on(type, handler) {
+          const current = eventHandlers.get(type) ?? [];
+          current.push(handler);
+          eventHandlers.set(type, current);
+          return () => {
+            eventHandlers.set(
+              type,
+              (eventHandlers.get(type) ?? []).filter(
+                (candidate) => candidate !== handler
+              )
+            );
+          };
+        },
+      },
+      keymap: {
+        registerLayer(layer) {
+          layers.push(layer);
+          return () => {};
+        },
+      },
+      lifecycle: {
+        onDispose(cleanup) {
+          cleanups.push(cleanup);
+          return () => {};
         },
       },
       route: {
         current: { name: "session", params: { sessionID: "parent" } },
         navigate: (name, params) => navigations.push([name, params]),
       },
+      slots: { register: (slot) => slots.push(slot) },
       state: {
         path: { directory: "/workspace" },
         session: {
@@ -62,233 +140,205 @@ function createApi({ children = [], restored = false, error, statuses = {}, them
       },
       theme: {
         current: {
+          backgroundElement: "#333333",
+          selectedListItemText: "#ffffff",
           text: "#eeeeee",
           textMuted: "#777777",
-          selectedListItemText: "#ffffff",
-          backgroundElement: "#333333",
-          ...theme,
+          warning: "#ffaa00",
         },
       },
       ui: {
-        DialogSelect: (props) => ({ type: "DialogSelect", props }),
+        DialogSelect: (props) => ({ props, type: "DialogSelect" }),
         dialog: {
-          open: false,
           clear: () => dialogs.push({ type: "clear" }),
+          open: false,
           replace: (render) => dialogs.push(render()),
         },
-        toast: (toast) => dialogs.push({ type: "toast", toast }),
-      },
-      kv: {
-        get: () => restored,
-        set: (...value) => writes.push(value),
-      },
-      event: {
-        on: () => () => {
-          eventDisposals += 1
-        },
-      },
-      lifecycle: {
-        onDispose(cleanup) {
-          cleanups.push(cleanup)
-          return () => {}
-        },
+        toast: (toast) => dialogs.push({ toast, type: "toast" }),
       },
     },
-  }
+    cleanups,
+    dialogs,
+    layers,
+    navigations,
+    slots,
+  };
 }
 
 async function renderControl(harness) {
-  const right = harness.slots[0].slots.session_prompt_right
-  const app = await testRender(() => <box>{right({}, { session_id: "parent" })}</box>, { width: 40, height: 3 })
-  return app
+  const right = harness.slots[0].slots.session_prompt_right;
+  rendered = await testRender(
+    () => <box>{right({}, { session_id: "parent" })}</box>,
+    { height: 3, width: 52 }
+  );
+  return rendered;
 }
 
-test("registers only a priority picker command and session_prompt_right slot", async () => {
-  const harness = createApi()
-  await SolOrchestratorTuiPlugin(harness.api)
-
-  assert.equal(harness.slots.length, 1)
-  assert.deepEqual(Object.keys(harness.slots[0].slots), ["session_prompt_right"])
-  assert.equal(harness.layers.length, 1)
-  assert.equal(harness.layers[0].priority, 1)
-  assert.equal(harness.layers[0].commands[0].name, "opencode-sol-orchestrator.subagents")
-  assert.deepEqual(harness.layers[0].bindings, [{ key: "ctrl+x down", cmd: "opencode-sol-orchestrator.subagents" }])
-  assert.equal(harness.slots.some((slot) => "session_prompt" in slot.slots), false)
-})
-
-test("uses the authoritative children response to hide and show the control under a Solid root", async () => {
-  const empty = createApi()
-  await SolOrchestratorTuiPlugin(empty.api)
-  const emptyApp = await renderControl(empty)
-  try {
-    await emptyApp.waitFor(() => empty.childrenCalls.length === 1)
-    await emptyApp.flush()
-    assert.equal(emptyApp.captureCharFrame().includes("Subagents"), false)
-    assert.deepEqual(empty.childrenCalls, [{ sessionID: "parent", directory: "/workspace" }])
-  } finally {
-    emptyApp.renderer.destroy()
-  }
-
-  const populated = createApi({ children: [{ id: "child-2", title: "Indexer" }] })
-  await SolOrchestratorTuiPlugin(populated.api)
-  const populatedApp = await renderControl(populated)
-  try {
-    await populatedApp.waitForFrame((frame) => frame.includes("Subagents"))
-    assert.deepEqual(populated.childrenCalls, [{ sessionID: "parent", directory: "/workspace" }])
-  } finally {
-    populatedApp.renderer.destroy()
-  }
-  assert.equal(populated.eventDisposals, 3)
-})
-
-test("renders conditional Subagents content through the real host slot registry", async () => {
-  const harness = createApi({ children: [{ id: "child-host", title: "Host child" }] })
-  await SolOrchestratorTuiPlugin(harness.api)
-
-  function App() {
-    const registry = createSolidSlotRegistry(useRenderer(), { theme: harness.api.theme })
-    const Slot = createSlot(registry)
-    registry.register({ ...harness.slots[0], id: "opencode-sol-orchestrator.tui" })
-    return (
-      <box>
-        <Slot name="session_prompt_right" session_id="parent" />
-      </box>
-    )
-  }
-
-  const app = await testRender(() => <App />, { width: 40, height: 3 })
-  try {
-    await app.waitFor(() => harness.childrenCalls.length === 1)
-    await app.waitForFrame((frame) => frame.includes("Subagents"))
-    assert.deepEqual(harness.childrenCalls, [{ sessionID: "parent", directory: "/workspace" }])
-  } finally {
-    app.renderer.destroy()
-  }
-})
-
-test("click and Ctrl+X Down invoke the picker, and selection opens the exact child", async () => {
-  const harness = createApi({ children: [{ id: "child-a", title: "A" }, { id: "child-b", title: "B" }] })
-  await SolOrchestratorTuiPlugin(harness.api)
-  const app = await renderControl(harness)
-  try {
-    await app.waitForFrame((frame) => frame.includes("Subagents"))
-    await app.mockMouse.click(1, 0)
-    await app.waitFor(() => harness.dialogs.length === 1)
-    assert.equal(harness.dialogs[0].type, "DialogSelect")
-
-    await harness.layers[0].commands[0].run()
-    assert.equal(harness.dialogs[1].type, "DialogSelect")
-    assert.equal(harness.navigations.length, 0)
-    assert.deepEqual(harness.dialogs[1].props.options.map((option) => option.value), ["child-a", "child-b"])
-
-    harness.dialogs[1].props.onSelect(harness.dialogs[1].props.options[1])
-    assert.deepEqual(harness.navigations, [["session", { sessionID: "child-b" }]])
-  } finally {
-    app.renderer.destroy()
-  }
-})
-
-test("shows child status in each picker option title", async () => {
+test("keeps native subagent navigation and registers the semantic workflow control", async () => {
   const harness = createApi({
-    children: [
-      { id: "child-busy", title: "Busy worker" },
-      { id: "child-retry", title: "Retry worker" },
-      { id: "child-idle", title: "Idle worker" },
-    ],
-    statuses: {
-      "child-busy": { type: "busy" },
-      "child-retry": { type: "retry" },
-    },
-  })
-  await SolOrchestratorTuiPlugin(harness.api)
-  const app = await renderControl(harness)
-  try {
-    await app.waitForFrame((frame) => frame.includes("Subagents"))
-    await app.mockMouse.click(1, 0)
-    await app.waitFor(() => harness.dialogs.length === 1)
-    assert.deepEqual(
-      harness.dialogs[0].props.options.map((option) => option.title),
-      ["● [active] Busy worker", "! [retry] Retry worker", "○ [idle] Idle worker"],
-    )
-  } finally {
-    app.renderer.destroy()
-  }
-})
+    children: [{ id: "child-1", title: "Verifier" }],
+    statuses: { "child-1": { type: "busy" } },
+  });
+  await createSolOrchestratorTuiPlugin({ readWorkflow: async () => null })(
+    harness.api
+  );
 
-test("groups picker options by live status while preserving order within each group", async () => {
-  const harness = createApi({
-    children: [
-      { id: "idle-a", title: "Idle A" },
-      { id: "busy-a", title: "Busy A" },
-      { id: "retry", title: "Retry" },
-      { id: "busy-b", title: "Busy B" },
-      { id: "idle-b", title: "Idle B" },
-    ],
-    statuses: {
-      "busy-a": { type: "busy" },
-      retry: { type: "retry" },
-      "busy-b": { type: "busy" },
-    },
-  })
-  await SolOrchestratorTuiPlugin(harness.api)
-  const app = await renderControl(harness)
-  try {
-    await app.waitForFrame((frame) => frame.includes("Subagents"))
-    await app.mockMouse.click(1, 0)
-    await app.waitFor(() => harness.dialogs.length === 1)
-    assert.deepEqual(harness.dialogs[0].props.options.map((option) => option.value), [
-      "busy-a",
-      "busy-b",
-      "retry",
-      "idle-a",
-      "idle-b",
+  expect(harness.layers[0].commands.map((entry) => entry.name)).toEqual([
+    "opencode-sol-orchestrator.subagents",
+    "opencode-sol-orchestrator.workflow",
+  ]);
+  await harness.layers[0].commands[0].run();
+  expect(harness.dialogs[0].type).toBe("DialogSelect");
+  expect(harness.dialogs[0].props.options[0].title).toContain("Verifier");
+  harness.dialogs[0].props.onSelect({ value: "child-1" });
+  expect(harness.navigations).toEqual([["session", { sessionID: "child-1" }]]);
+});
+
+test("shows the exact workflow_start call when no workflow exists", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({ readWorkflow: async () => null })(
+    harness.api
+  );
+  const app = await renderControl(harness);
+  await app.waitForFrame((frame) => frame.includes("Subagents"));
+  await harness.layers[0].commands[1].run();
+
+  expect(harness.dialogs[0].toast.message).toContain(
+    "workflow_start({}) · needs: objective, steps"
+  );
+});
+
+test("renders active steps and jobs with the available delegation action", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({
+    readWorkflow: async () => workflow(),
+  })(harness.api);
+  const app = await renderControl(harness);
+  await app.waitForFrame((frame) => frame.includes("Workflow active"));
+  await harness.layers[0].commands[1].run();
+
+  const dialog = harness.dialogs[0];
+  expect(dialog.props.title).toBe("Workflow · v2 · active");
+  expect(dialog.props.options.map((option) => option.title)).toEqual(
+    expect.arrayContaining([
+      "Step · verify · active",
+      "  Job · verify simplified boundary · ready",
+      "Available · workflow_delegate({})",
     ])
-  } finally {
-    app.renderer.destroy()
-  }
-})
+  );
+  expect(dialog.props.options[1].description).toContain(
+    "luna-medium · verification"
+  );
+});
 
-test("brightens Subagents on mouse over and restores muted styling on mouse out", async () => {
-  const harness = createApi({ children: [{ id: "child-hover", title: "Hover worker" }] })
-  await SolOrchestratorTuiPlugin(harness.api)
-  const app = await renderControl(harness)
-  try {
-    await app.waitForFrame((frame) => frame.includes("Subagents"))
-    const span = () => app.captureSpans().lines.flatMap((line) => line.spans).find((item) => item.text.includes("Subagents"))
-    const color = (value) => value && [value.r, value.g, value.b, value.a]
-    assert.deepEqual(color(span()?.fg), [119 / 255, 119 / 255, 119 / 255, 1])
-    await app.mockMouse.moveTo(1, 0)
-    await app.flush()
-    assert.deepEqual(color(span()?.fg), [238 / 255, 238 / 255, 238 / 255, 1])
-    assert.notDeepEqual(color(span()?.fg), [1, 1, 1, 1])
-    assert.deepEqual(color(span()?.bg), [51 / 255, 51 / 255, 51 / 255, 1])
-    await app.mockMouse.moveTo(20, 2)
-    await app.flush()
-    assert.deepEqual(color(span()?.fg), [119 / 255, 119 / 255, 119 / 255, 1])
-    assert.equal(span()?.bg.a, 0)
-  } finally {
-    app.renderer.destroy()
-  }
-})
+test("renders the durable goal while Sol is between workflows", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({
+    readWorkflow: async () => goalBetweenWorkflows(),
+  })(harness.api);
+  const app = await renderControl(harness);
+  await app.waitForFrame((frame) => frame.includes("Goal active"));
+  await harness.layers[0].commands[1].run();
 
-test("surfaces child-loading failures and cleans registrations through the lifecycle", async () => {
-  const harness = createApi({ error: new Error("offline") })
-  await SolOrchestratorTuiPlugin(harness.api)
-  await harness.layers[0].commands[0].run()
+  const dialog = harness.dialogs[0];
+  expect(dialog.props.title).toBe("Goal · active · between workflows");
+  expect(dialog.props.options[0]).toMatchObject({
+    description: "Deliver the full outcome across bounded workflows.",
+    title: "Goal · active",
+  });
+  expect(dialog.props.options.at(-1).title).toBe(
+    "Available · workflow_start({}) · needs: objective, steps"
+  );
+});
 
-  assert.deepEqual(harness.dialogs, [
-    {
-      type: "toast",
-      toast: {
-        variant: "error",
-        title: "Subagents unavailable",
-        message: "Failed to load subagents: offline",
-        duration: 3000,
-      },
-    },
-  ])
-  assert.equal(harness.cleanups.length, 1)
-  harness.cleanups[0]()
-  assert.equal(harness.layerDisposals, 1)
-  assert.equal(harness.eventDisposals, 0)
-})
+test("renders a blocked workflow with its blocker and exact retry call", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({
+    readWorkflow: async () =>
+      workflow({
+        jobState: "blocked",
+        latestEvent: {
+          kind: "blocker",
+          message: "The native permission disappeared.",
+        },
+        liveState: "blocked",
+        availableActions: [
+          {
+            args: {},
+            needs: ["reason"],
+            tool: "workflow_retry",
+          },
+        ],
+        state: "blocked",
+      }),
+  })(harness.api);
+  const app = await renderControl(harness);
+  await app.waitForFrame((frame) => frame.includes("Workflow blocked"));
+  await harness.layers[0].commands[1].run();
+
+  const options = harness.dialogs[0].props.options;
+  expect(options[1].description).toContain(
+    "The native permission disappeared."
+  );
+  expect(options.at(-1).title).toBe(
+    "Available · workflow_retry({}) · needs: reason"
+  );
+});
+
+test("renders review metadata, targeted inspection, acceptance, and undo availability", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({
+    readWorkflow: async () =>
+      workflow({
+        jobState: "review",
+        latestEvent: { kind: "result" },
+        liveState: "review",
+        availableActions: [
+          {
+            args: { job: "verify simplified boundary", type: "result" },
+            tool: "agents_inspect",
+          },
+          {
+            args: {},
+            needs: ["message"],
+            tool: "workflow_complete",
+          },
+        ],
+        resultAvailable: true,
+      }),
+  })(harness.api);
+  await harness.layers[0].commands[1].run();
+
+  const options = harness.dialogs[0].props.options;
+  expect(options[1].description).toContain("review");
+  expect(options[1].description).toContain("result available");
+  expect(options[2].title).toContain("src/tui.tsx · +3 -1 · isolated · undo");
+  expect(options.map((option) => option.title)).toEqual(
+    expect.arrayContaining([
+      'Available · agents_inspect({"job":"verify simplified boundary","type":"result"})',
+      "Available · workflow_complete({}) · needs: message",
+    ])
+  );
+});
+
+test("renders completed workflow history without inventing another action", async () => {
+  const harness = createApi();
+  await createSolOrchestratorTuiPlugin({
+    readWorkflow: async () =>
+      workflow({
+        jobState: "completed",
+        availableActions: [],
+        state: "completed",
+      }),
+  })(harness.api);
+  const app = await renderControl(harness);
+  await app.waitForFrame((frame) => frame.includes("Workflow completed"));
+  await harness.layers[0].commands[1].run();
+
+  expect(harness.dialogs[0].props.title).toBe("Workflow · v2 · completed");
+  expect(
+    harness.dialogs[0].props.options.some((option) =>
+      option.title.startsWith("Available ·")
+    )
+  ).toBe(false);
+});

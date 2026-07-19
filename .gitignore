@@ -1,3 +1,6 @@
 node_modules/
+.opencode/
+.turbo/
+dist/
 *.tgz
 .DS_Store
