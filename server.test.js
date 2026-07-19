@@ -192,13 +192,16 @@ test("ships no unused custom tool-error correction owner", async () => {
   )
 })
 
-test("documents truthful available actions without placeholder arguments", async () => {
+test("keeps the README focused on product behavior and installation", async () => {
   const readme = await readFile(new URL("./README.md", import.meta.url), "utf8")
-  assert.match(readme, /available_actions/u)
-  assert.doesNotMatch(readme, /next_actions/u)
-  assert.match(
+  assert.match(readme, /One goal, many workflows/u)
+  assert.match(readme, /Graph v1/u)
+  assert.match(readme, /actions available now/u)
+  assert.match(readme, /ReyJ94\/Opencode-Operational-Checkpoint/u)
+  assert.match(readme, /ReyJ94\/Opencode-Skill-Picker/u)
+  assert.doesNotMatch(
     readme,
-    /"args": \{\},\s*"needs": \["objective", "steps"\],\s*"tool": "workflow_start"/u
+    /state-v2|state\.json|OPENCODE_SOL_ORCHESTRATOR_STATE_PATH/u
   )
-  assert.doesNotMatch(readme, /"objective":"<concrete objective>"/u)
+  assert.doesNotMatch(readme, /agents_inspect|workflow_start|available_actions/u)
 })
