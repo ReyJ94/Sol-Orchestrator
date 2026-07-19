@@ -199,9 +199,12 @@ test("keeps the README focused on product behavior and installation", async () =
   assert.match(readme, /actions available now/u)
   assert.match(readme, /ReyJ94\/Opencode-Operational-Checkpoint/u)
   assert.match(readme, /ReyJ94\/Opencode-Skill-Picker/u)
+  assert.match(readme, /<summary><strong>Command reference<\/strong><\/summary>/u)
+  assert.match(readme, /workflow_start/u)
+  assert.match(readme, /agents_inspect/u)
   assert.doesNotMatch(
     readme,
     /state-v2|state\.json|OPENCODE_SOL_ORCHESTRATOR_STATE_PATH/u
   )
-  assert.doesNotMatch(readme, /agents_inspect|workflow_start|available_actions/u)
+  assert.doesNotMatch(readme, /available_actions/u)
 })

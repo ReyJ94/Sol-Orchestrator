@@ -167,6 +167,49 @@ The installer configures both the server and TUI entrypoints. OpenCode loads
 plugins and agent prompts at startup, so restart it after installing or
 updating the plugin.
 
+<details>
+<summary><strong>Command reference</strong></summary>
+
+Most users only need to start Sol and create a goal. The remaining actions are
+the semantic controls Sol uses while running the workflow.
+
+### Start and stop
+
+| Command | Purpose |
+| --- | --- |
+| `opencode --agent sol` | Start OpenCode with Sol as the orchestrator. |
+| `/goal <objective>` | Create a durable goal and let Sol design its first workflow. |
+| `/goal-stop` | Stop the goal and its workers without reverting repository changes. |
+
+### Goal and workflow actions
+
+| Action | Purpose |
+| --- | --- |
+| `goal_complete` | Close the goal after the user's full outcome is proven. |
+| `goal_block` | Pause liveness at a genuine user or external boundary. |
+| `goal_resume` | Continue after the blocker is resolved. |
+| `workflow_status` | Read the current graph and the actions possible now. |
+| `workflow_start` | Start a complete semantic workflow. |
+| `workflow_delegate` | Assign and launch one ready worker job. |
+| `workflow_complete` | Complete Sol's job or accept a reviewed worker result. |
+| `workflow_retry` | Reopen one reviewed or blocked job without redesigning it. |
+| `workflow_replace` | Replace unfinished work with a new graph version. |
+
+### Worker actions
+
+| Action | Purpose |
+| --- | --- |
+| `agents_status` | See compact worker state and the controls available now. |
+| `agents_inspect` | Materialize one selected result, diff, or tool output for targeted local search. |
+| `agents_send` | Steer work that is already in progress. |
+| `agents_wait` | Wait for a meaningful event from one or more workers. |
+| `agents_interrupt` | Stop a worker that is obsolete, blocked, or no longer useful. |
+| `agents_permission` | Decide a suspended write outside an authored scope. |
+| `agents_undo` | Revert an isolated worker turn when its safety checks pass. |
+| `agents_redo` | Restore that turn while the guarded redo window remains valid. |
+
+</details>
+
 ## Optional companion plugins
 
 Sol Orchestrator works on its own. These plugins complement it when you want a
