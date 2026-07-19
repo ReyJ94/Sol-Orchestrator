@@ -211,6 +211,7 @@ type LatestEvent = NonNullable<WorkerBindingRecord["latest_event"]>;
 
 const setup = async (
   options: {
+    defaultArtifactDirectory?: boolean;
     latestEvent?: LatestEvent | null;
     liveState?: "busy" | "review";
     pendingPermission?: boolean;
@@ -368,7 +369,9 @@ const setup = async (
       return Promise.resolve();
     },
     store,
-    artifactDirectory: path.join(directory, "worker-artifacts"),
+    ...(options.defaultArtifactDirectory
+      ? {}
+      : { artifactDirectory: path.join(directory, "worker-artifacts") }),
   });
   return {
     files,
@@ -813,6 +816,32 @@ describe("WorkerTurns pull-based metadata", () => {
     expect(metadata).not.toContain(RESULT_SENTINEL);
     expect(metadata).not.toContain(TOOL_SENTINEL);
     expect(metadata).not.toContain(PATCH_SENTINEL);
+  });
+
+  test("materializes default artifacts inside OpenCode's permission-free temporary directory", async () => {
+    const { turns } = await setup({ defaultArtifactDirectory: true });
+    await turns.status({ parent_session_id: parentSessionID, task_id: taskID });
+
+    const result = await turns.inspect({
+      parent_session_id: parentSessionID,
+      task_id: taskID,
+      turn: 1,
+      type: "result",
+    });
+
+    const relative = path.relative(
+      path.join(os.tmpdir(), "opencode"),
+      result.artifact.path
+    );
+    expect(relative.startsWith("..") || path.isAbsolute(relative)).toBe(false);
+    const workflowDirectory = path.resolve(result.artifact.directory, "../..");
+    directories.push(path.dirname(workflowDirectory));
+
+    await turns.cleanupWorkflow("workflow-1");
+
+    await expect(stat(workflowDirectory)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   test("inspects an advertised completed tool output from a superseded turn", async () => {

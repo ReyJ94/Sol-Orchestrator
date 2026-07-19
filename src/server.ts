@@ -458,6 +458,8 @@ export const createDefaultServerRuntime = (input: {
   });
   const workflowService = new WorkflowToolService({
     available_workers: () => availableWorkerProfiles,
+    cleanup_workflow: async (workflowID) =>
+      await workerTurns.cleanupWorkflow(workflowID),
     create_id: createID,
     refresh_workers: async (parentSessionID) => {
       await workerTurns.status({ parent_session_id: parentSessionID });
@@ -795,7 +797,7 @@ const workflowToolsWithHealth = (
     ])
   );
 
-export const SolOrchestratorPlugin = async (
+export const SolOrchestratorPlugin = (
   input: ServerInput,
   options: ServerOptions = {}
 ) => {
@@ -858,7 +860,7 @@ export const SolOrchestratorPlugin = async (
     }
     if (hookInput.tool === "task") {
       throw new Error(
-        "Native task launch bypasses managed workflow supervision. Author the worker job in the current workflow and use workflow_delegate({}); the harness creates, binds, and starts the worker atomically."
+        "Native task launch bypasses managed workflow supervision. Author the worker job in the current workflow; the harness creates, binds, and starts it automatically when its graph dependencies are complete."
       );
     }
     if (!SOL_STRUCTURED_MUTATION_TOOLS.has(hookInput.tool)) {
@@ -1639,33 +1641,51 @@ export const SolOrchestratorPlugin = async (
     return await queued;
   };
 
-  for (const outcome of await runtime.reconcile()) {
-    if (
-      outcome.action === "resume_delivery" &&
-      outcome.delivery !== null &&
-      outcome.status !== "missing"
-    ) {
-      await routeDelivery({
-        activeTool: outcome.active_tool,
-        restart: true,
-        state: outcome.delivery,
-        status: outcome.status,
-        taskID: outcome.task_id,
-        userMessageExists: outcome.delivery_user_message_exists,
-      });
-    }
-  }
-  for (const taskID of await workerTurns.reconcileIncompleteMutations()) {
-    scheduleTerminalAbort(taskID);
-  }
-  const restartGoals = (await store.readRoot()).goals.goals.filter(
-    (goal) => goal.status === "active"
-  );
-  for (const goal of restartGoals) {
-    await continueActiveGoal(goal.parent_session_id, {
-      recoverReserved: true,
-    });
-  }
+  let startupRecovery: Promise<void> | undefined;
+  const startRuntimeRecovery = (): Promise<void> => {
+    startupRecovery ??= (async () => {
+      const outcomes = await runtime.reconcile();
+      for (const outcome of outcomes) {
+        if (
+          outcome.action === "resume_delivery" &&
+          outcome.delivery !== null &&
+          outcome.status !== "missing"
+        ) {
+          await routeDelivery({
+            activeTool: outcome.active_tool,
+            restart: true,
+            state: outcome.delivery,
+            status: outcome.status,
+            taskID: outcome.task_id,
+            userMessageExists: outcome.delivery_user_message_exists,
+          });
+        }
+      }
+      const recoveredRoot = await store.readRoot();
+      for (const parentSessionID of new Set(
+        recoveredRoot.workers.map((worker) => worker.parent_session_id)
+      )) {
+        await workerTurns.status({ parent_session_id: parentSessionID });
+      }
+      for (const taskID of await workerTurns.reconcileIncompleteMutations()) {
+        scheduleTerminalAbort(taskID);
+      }
+      const restartGoals = (await store.readRoot()).goals.goals.filter(
+        (goal) => goal.status === "active"
+      );
+      for (const goal of restartGoals) {
+        await continueActiveGoal(goal.parent_session_id, {
+          recoverReserved: true,
+        });
+      }
+    })().catch(() => undefined);
+    return startupRecovery;
+  };
+  let configuredRecovery = Promise.resolve();
+  const awaitRuntimeRecovery = async (): Promise<void> => {
+    await startRuntimeRecovery();
+    await configuredRecovery;
+  };
 
   const tools: Record<string, ToolDefinition> = {
     ...workflowDefinitions,
@@ -2419,44 +2439,51 @@ export const SolOrchestratorPlugin = async (
     for (const worker of workers) {
       await sessions.abort(worker.child_session_id, input.directory);
     }
-    await store.mutateRoot(({ goal, root, workflow }) => {
-      const current = goal.currentFor(
-        selected.parent_session_id,
-        selected.orchestrator_agent_id
-      );
-      if (current?.goal_id !== selected.goal_id) {
-        throw new Error(
-          "The current goal changed before stop could be applied."
+    const removedWorkflowIDs = await store.mutateRoot(
+      ({ goal, root, workflow }) => {
+        const current = goal.currentFor(
+          selected.parent_session_id,
+          selected.orchestrator_agent_id
         );
+        if (current?.goal_id !== selected.goal_id) {
+          throw new Error(
+            "The current goal changed before stop could be applied."
+          );
+        }
+        const removed = new Set(workflow.removeGoalWorkflows(selected.goal_id));
+        const removedTaskIDs = new Set(
+          root.workers
+            .filter((worker) => removed.has(worker.workflow_id))
+            .map((worker) => worker.task_id)
+        );
+        root.deliveries = root.deliveries.filter(
+          (delivery) => !removedTaskIDs.has(delivery.task_id)
+        );
+        root.job_runs = root.job_runs.filter(
+          (run) => !removed.has(run.workflow_id)
+        );
+        root.permissions = root.permissions.filter(
+          (permission) => !removedTaskIDs.has(permission.task_id)
+        );
+        root.turns = root.turns.filter(
+          (turn) => !removedTaskIDs.has(turn.task_id)
+        );
+        root.workers = root.workers.filter(
+          (worker) => !removed.has(worker.workflow_id)
+        );
+        goal.stop({
+          goal_id: selected.goal_id,
+          message: "Stopped by explicit user command.",
+        });
+        return [...removed];
       }
-      const removedWorkflowIDs = new Set(
-        workflow.removeGoalWorkflows(selected.goal_id)
-      );
-      const removedTaskIDs = new Set(
-        root.workers
-          .filter((worker) => removedWorkflowIDs.has(worker.workflow_id))
-          .map((worker) => worker.task_id)
-      );
-      root.deliveries = root.deliveries.filter(
-        (delivery) => !removedTaskIDs.has(delivery.task_id)
-      );
-      root.job_runs = root.job_runs.filter(
-        (run) => !removedWorkflowIDs.has(run.workflow_id)
-      );
-      root.permissions = root.permissions.filter(
-        (permission) => !removedTaskIDs.has(permission.task_id)
-      );
-      root.turns = root.turns.filter(
-        (turn) => !removedTaskIDs.has(turn.task_id)
-      );
-      root.workers = root.workers.filter(
-        (worker) => !removedWorkflowIDs.has(worker.workflow_id)
-      );
-      goal.stop({
-        goal_id: selected.goal_id,
-        message: "Stopped by explicit user command.",
-      });
-    });
+    );
+    await Promise.all(
+      removedWorkflowIDs.map(
+        async (workflowID) =>
+          await workerTurns.cleanupWorkflow(workflowID).catch(() => undefined)
+      )
+    );
   };
 
   const startGoalFromUserCommand = async (
@@ -2509,11 +2536,15 @@ export const SolOrchestratorPlugin = async (
         }
       }
       runtime.setAvailableWorkerProfiles(configuredWorkerProfiles(configured));
+      configuredRecovery = startRuntimeRecovery()
+        .then(async () => await runtime.workflowService.recoverReadyWorkers())
+        .catch(() => undefined);
     },
     async "command.execute.before"(
       hookInput: { arguments: string; command: string; sessionID: string },
       output: { parts: unknown[] }
     ) {
+      await awaitRuntimeRecovery();
       if (hookInput.command !== "goal-stop") {
         if (hookInput.command !== "goal") {
           return;
@@ -2545,6 +2576,7 @@ export const SolOrchestratorPlugin = async (
       hookInput: { callID: string; sessionID: string; tool: string },
       output: { args: unknown }
     ) {
+      await awaitRuntimeRecovery();
       const root = await store.readRoot();
       enforceSolWorkflowBoundary(root, hookInput);
       await workerTurns.beforeTool({ ...hookInput, args: output.args });
@@ -2564,6 +2596,7 @@ export const SolOrchestratorPlugin = async (
       },
       output: { metadata: unknown; output?: string; title?: string }
     ) {
+      await awaitRuntimeRecovery();
       const mutationAudit = await workerTurns.afterTool(hookInput);
       const root = await store.readRoot();
       const worker = workerForSession(root, hookInput.sessionID);
@@ -2582,6 +2615,7 @@ export const SolOrchestratorPlugin = async (
       }
     },
     async event({ event }: { event: Record<string, unknown> }) {
+      await awaitRuntimeRecovery();
       if (event.type === "message.updated") {
         await handleMessageUpdated(event);
         return;

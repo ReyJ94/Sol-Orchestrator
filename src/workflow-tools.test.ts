@@ -19,13 +19,11 @@ const bulkContentPattern = /result_body|transcript|patch_text/i;
 const currentWorkflowPattern = /unfinished|current/i;
 const internalStatusPattern =
   /workflow_id|version|lease|prompt_id|message_id|run_id|evidence_id/i;
-const nativeTaskIdentifierPattern =
-  /task_id|task_ids|child_session|lease|prompt_id|run_id|required_next_action|subagent_type|background/i;
+const launchFailurePattern = /could not launch/i;
 const recoveryCandidatesPattern = /frame|research/i;
 const reviewAndSolCandidatesPattern = /research|frame|parallel sol/i;
 const solCandidatesPattern = /frame|parallel sol/i;
 const versionPattern = /version|workflow_id/i;
-const workerCandidatesPattern = /research|verify frame/i;
 const unavailableProfilePattern = /missing-profile.*local-verifier/u;
 
 const required = <Value>(value: Value | undefined, message: string): Value => {
@@ -114,7 +112,9 @@ const bundledProfiles = [
 ] as const;
 
 const harness = (
-  availableWorkers: readonly WorkerProfileDescriptor[] = bundledProfiles
+  availableWorkers: readonly WorkerProfileDescriptor[] = bundledProfiles,
+  beforeLaunch?: (input: LaunchInput) => Promise<void>,
+  cleanupWorkflow?: (workflowID: string) => Promise<void>
 ) => {
   const state = new WorkflowState({ now: () => timestamp });
   const root = emptyRootSnapshot();
@@ -152,18 +152,29 @@ const harness = (
     },
   };
   const workers = {
-    launch(input: LaunchInput) {
+    async launch(input: LaunchInput) {
       launches.push(input);
-      const taskID = `child-${input.definition_job.name}`;
+      await beforeLaunch?.(input);
+      const sequence = launches.filter(
+        (launch) => launch.definition_job.name === input.definition_job.name
+      ).length;
+      const taskID = `child-${input.definition_job.name}-${sequence}`;
       state.markWorkerActive({
         job: input.definition_job.name,
         task_id: taskID,
         workflow_id: input.workflow_id,
       });
+      const runSequence = required(
+        state.jobState({
+          job: input.definition_job.name,
+          workflow_id: input.workflow_id,
+        })?.run_sequence,
+        "Expected active worker run sequence."
+      );
       root.job_runs.push({
         job: input.definition_job.name,
         result_available: false,
-        run_sequence: 1,
+        run_sequence: runSequence,
         started_at: timestamp,
         state: "active",
         task_id: taskID,
@@ -182,17 +193,17 @@ const harness = (
         mode: input.definition_job.mode,
         parent_session_id: input.parent_session_id,
         profile: input.definition_job.actor.profile,
-        run_sequence: 1,
+        run_sequence: runSequence,
         task_id: taskID,
         updated_at: timestamp,
         workflow_id: input.workflow_id,
         workflow_version: input.workflow_version,
       });
-      return Promise.resolve();
     },
   };
   const service = new WorkflowToolService({
     available_workers: () => availableWorkers,
+    cleanup_workflow: cleanupWorkflow,
     create_id: () => "internal-workflow-id",
     store,
     workers,
@@ -207,12 +218,11 @@ const start = async (service: WorkflowToolService) =>
   );
 
 describe("workflow tool definitions", () => {
-  test("registers exactly the six accepted workflow tools", () => {
+  test("registers exactly the five accepted workflow tools", () => {
     const { service } = harness();
 
     expect(Object.keys(createWorkflowToolDefinitions(service)).sort()).toEqual([
       "workflow_complete",
-      "workflow_delegate",
       "workflow_replace",
       "workflow_retry",
       "workflow_start",
@@ -220,17 +230,19 @@ describe("workflow tool definitions", () => {
     ]);
   });
 
-  test("launches the worker atomically and returns refreshed semantic state", async () => {
+  test("workflow_start launches ready workers and returns refreshed semantic state", async () => {
     const { service } = harness();
-    await start(service);
     const definitions = createWorkflowToolDefinitions(service);
 
     const output = JSON.parse(
       String(
-        await definitions.workflow_delegate.execute({}, {
-          agent: "sol",
-          sessionID: "parent-1",
-        } as never)
+        await definitions.workflow_start.execute(
+          { objective: "Exercise tool semantics", steps: steps() } as never,
+          {
+            agent: "sol",
+            sessionID: "parent-1",
+          } as never
+        )
       )
     );
 
@@ -260,10 +272,262 @@ describe("workflow tool definitions", () => {
     ).rejects.toThrow();
 
     await start(service);
-    expect(service.delegate({ job_id: "research" }, context)).rejects.toThrow();
     expect(
       service.complete({ job_id: "frame", message: "Legacy selector" }, context)
     ).rejects.toThrow();
+  });
+});
+
+describe("graph-driven worker execution", () => {
+  test("removes disposable workflow artifacts after the final job completes", async () => {
+    const cleaned: string[] = [];
+    const { service } = harness(bundledProfiles, undefined, (workflowID) => {
+      cleaned.push(workflowID);
+      return Promise.resolve();
+    });
+    await service.start(
+      {
+        objective: "Clean completed workflow artifacts",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { type: "orchestrator" },
+                name: "close workflow",
+                objective: "Close the workflow",
+              },
+            ],
+            name: "finish",
+            objective: "Finish once",
+          },
+        ],
+      },
+      context
+    );
+
+    await service.complete({ message: "The workflow is complete." }, context);
+
+    expect(cleaned).toEqual(["internal-workflow-id"]);
+  });
+
+  test("starts every initially ready worker in parallel without another Sol action", async () => {
+    let inFlight = 0;
+    let maximumInFlight = 0;
+    const { launches, service } = harness(bundledProfiles, async () => {
+      inFlight += 1;
+      maximumInFlight = Math.max(maximumInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+    });
+    const status = await service.start(
+      {
+        objective: "Launch independent evidence concurrently",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { profile: "luna-medium", type: "worker" },
+                mode: "research",
+                name: "inspect runtime",
+                objective: "Inspect runtime behavior",
+              },
+              {
+                actor: { profile: "luna-max", type: "worker" },
+                mode: "verification",
+                name: "verify contract",
+                objective: "Verify the installed contract",
+              },
+            ],
+            name: "gather evidence",
+            objective: "Gather independent evidence",
+          },
+        ],
+      },
+      context
+    );
+
+    expect(launches.map((launch) => launch.definition_job.name).sort()).toEqual(
+      ["inspect runtime", "verify contract"]
+    );
+    expect(maximumInFlight).toBe(2);
+    expect(status.current?.steps[0]?.jobs.map((job) => job.state)).toEqual([
+      "active",
+      "active",
+    ]);
+    expect(
+      status.available_actions.some(
+        (action) => action.tool === "workflow_delegate"
+      )
+    ).toBe(false);
+  });
+
+  test("launches a dependent worker only after Sol accepts its prerequisite", async () => {
+    const { launches, service, state } = harness();
+    const status = await service.start(
+      {
+        objective: "Respect the review gate",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { profile: "luna-max", type: "worker" },
+                mode: "research",
+                name: "research owner",
+                objective: "Research the owner",
+              },
+            ],
+            name: "research",
+            objective: "Establish the owner",
+          },
+          {
+            dependsOn: ["research"],
+            jobs: [
+              {
+                actor: { profile: "terra-medium", type: "worker" },
+                mode: "implementation",
+                name: "implement owner",
+                objective: "Implement the decided owner",
+              },
+            ],
+            name: "implementation",
+            objective: "Implement the result",
+          },
+        ],
+      },
+      context
+    );
+
+    expect(launches.map((launch) => launch.definition_job.name)).toEqual([
+      "research owner",
+    ]);
+    expect(status.current?.steps[1]?.jobs[0]?.state).toBe("pending");
+    state.markWorkerReview({
+      job: "research owner",
+      result_available: true,
+      workflow_id: "internal-workflow-id",
+    });
+    expect(launches).toHaveLength(1);
+
+    const accepted = await service.complete(
+      { message: "Accepted the research result." },
+      context
+    );
+
+    expect(launches.map((launch) => launch.definition_job.name)).toEqual([
+      "research owner",
+      "implement owner",
+    ]);
+    expect(accepted.current?.steps[1]?.jobs[0]?.state).toBe("active");
+  });
+
+  test("isolates one native launch failure and retry starts only that job", async () => {
+    let failedOnce = false;
+    const { launches, service } = harness(bundledProfiles, (input) => {
+      if (input.definition_job.name === "unavailable worker" && !failedOnce) {
+        failedOnce = true;
+        return Promise.reject(new Error("native child creation failed"));
+      }
+      return Promise.resolve();
+    });
+    const started = await service.start(
+      {
+        objective: "Keep independent launch failures isolated",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { profile: "luna-medium", type: "worker" },
+                mode: "verification",
+                name: "healthy worker",
+                objective: "Run the healthy verification",
+              },
+              {
+                actor: { profile: "luna-max", type: "worker" },
+                mode: "research",
+                name: "unavailable worker",
+                objective: "Exercise launch failure",
+              },
+            ],
+            name: "parallel work",
+            objective: "Launch independent jobs",
+          },
+        ],
+      },
+      context
+    );
+
+    expect(
+      started.current?.steps[0]?.jobs.find(
+        (job) => job.name === "healthy worker"
+      )?.state
+    ).toBe("active");
+    expect(
+      started.current?.steps[0]?.jobs.find(
+        (job) => job.name === "unavailable worker"
+      )
+    ).toMatchObject({
+      state: "blocked",
+      status_message: expect.stringMatching(launchFailurePattern),
+    });
+
+    const retried = await service.retry(
+      { reason: "The native boundary is available now." },
+      context
+    );
+
+    expect(
+      launches.filter(
+        (launch) => launch.definition_job.name === "healthy worker"
+      )
+    ).toHaveLength(1);
+    expect(
+      launches.filter(
+        (launch) => launch.definition_job.name === "unavailable worker"
+      )
+    ).toHaveLength(2);
+    expect(
+      retried.current?.steps[0]?.jobs.find(
+        (job) => job.name === "unavailable worker"
+      )?.state
+    ).toBe("active");
+  });
+
+  test("concurrent status recovery dispatches one persisted ready job once", async () => {
+    const { launches, service, state } = harness(
+      bundledProfiles,
+      async () => await Promise.resolve()
+    );
+    state.start({
+      definition: normalizeWorkflowDefinition({
+        objective: "Recover ready work",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { profile: "luna-medium", type: "worker" },
+                mode: "verification",
+                name: "recover verifier",
+                objective: "Verify after restart",
+              },
+            ],
+            name: "recover",
+            objective: "Recover persisted readiness",
+          },
+        ],
+      }),
+      orchestrator_agent_id: "sol",
+      parent_session_id: "parent-1",
+      workflow_id: "internal-workflow-id",
+    });
+
+    const [left, right] = await Promise.all([
+      service.status({}, context),
+      service.status({}, context),
+    ]);
+
+    expect(launches).toHaveLength(1);
+    expect(left.current?.steps[0]?.jobs[0]?.state).toBe("active");
+    expect(right.current?.steps[0]?.jobs[0]?.state).toBe("active");
   });
 });
 
@@ -319,7 +583,7 @@ describe("WorkflowToolService status and selection", () => {
     expect(status.available_workers).toEqual(customProfiles);
     expect(status.current?.steps[0]?.jobs[0]).toMatchObject({
       actor: { profile: "local-verifier", type: "worker" },
-      state: "ready",
+      state: "active",
     });
 
     const unavailable = harness(customProfiles).service;
@@ -369,7 +633,7 @@ describe("WorkflowToolService status and selection", () => {
       "active"
     );
     expect(projectedJobs?.find((job) => job.name === "research")?.state).toBe(
-      "ready"
+      "active"
     );
     expect(serialized).not.toContain("internal-workflow-id");
     expect(serialized).not.toMatch(internalStatusPattern);
@@ -387,7 +651,6 @@ describe("WorkflowToolService status and selection", () => {
           needs: ["message"],
           tool: "workflow_complete",
         },
-        { args: {}, tool: "workflow_delegate" },
         {
           args: {},
           needs: ["reason", "steps"],
@@ -420,46 +683,18 @@ describe("WorkflowToolService status and selection", () => {
   });
 
   test("joins bounded worker decision metadata into its semantic job", async () => {
-    const { root, service, state } = harness();
+    const { root, service } = harness();
     await start(service);
-    state.markWorkerActive({
-      job: "research",
-      task_id: "child-1",
-      workflow_id: "internal-workflow-id",
-    });
-    root.job_runs.push({
-      job: "research",
-      result_available: false,
-      run_sequence: 1,
-      started_at: timestamp,
-      state: "active",
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-      write_grants: ["src/extra.ts"],
-    });
-    root.workers.push({
-      child_session_id: "child-1",
+    const worker = required(root.workers[0], "Expected launched worker.");
+    worker.latest_event = {
       created_at: timestamp,
-      delivered_event_sequence: 0,
-      job: "research",
-      latest_event: {
-        created_at: timestamp,
-        kind: "progress",
-        message: "Located the decision owner.",
-        sequence: 1,
-      },
-      live_state: "busy",
-      mode: "research",
-      parent_session_id: context.parent_session_id,
-      profile: "luna-max",
-      run_sequence: 1,
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-    });
+      kind: "progress",
+      message: "Located the decision owner.",
+      sequence: 1,
+    };
+    worker.live_state = "busy";
+    const run = required(root.job_runs[0], "Expected launched run.");
+    run.write_grants = ["src/extra.ts"];
 
     const status = await service.status({}, context);
     const research = status.current?.steps
@@ -496,10 +731,9 @@ describe("WorkflowToolService status and selection", () => {
       delivery_id: "delivery-1",
       message: "Refocus on the owner.",
       state: "pending_preemption",
-      task_id: "child-1",
+      task_id: worker.task_id,
       updated_at: timestamp,
     });
-    const worker = required(root.workers[0], "Expected seeded worker.");
     worker.live_state = "preempting";
     const preempting = await service.status({}, context);
     expect(preempting.available_actions).toContainEqual({
@@ -527,45 +761,15 @@ describe("WorkflowToolService status and selection", () => {
   test("puts permission judgment and result inspection before lifecycle closure", async () => {
     const { root, service, state } = harness();
     await start(service);
-    state.markWorkerActive({
-      job: "research",
-      task_id: "child-1",
-      workflow_id: "internal-workflow-id",
-    });
-    root.job_runs.push({
-      job: "research",
-      result_available: false,
-      run_sequence: 1,
-      started_at: timestamp,
-      state: "active",
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-      write_grants: [],
-    });
-    root.workers.push({
-      child_session_id: "child-1",
-      created_at: timestamp,
-      delivered_event_sequence: 0,
-      job: "research",
-      latest_event: null,
-      live_state: "busy",
-      mode: "research",
-      parent_session_id: context.parent_session_id,
-      profile: "luna-max",
-      run_sequence: 1,
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-    });
+    const worker = required(root.workers[0], "Expected launched worker.");
+    worker.live_state = "busy";
+    const run = required(root.job_runs[0], "Expected launched run.");
     root.permissions.push({
       created_at: timestamp,
       permission: "edit",
       request_id: "internal-permission-id",
       requested_paths: ["src/extra.ts"],
-      task_id: "child-1",
+      task_id: worker.task_id,
       tool: "apply_patch",
     });
 
@@ -598,7 +802,6 @@ describe("WorkflowToolService status and selection", () => {
       result_available: true,
       workflow_id: "internal-workflow-id",
     });
-    const worker = required(root.workers[0], "Expected seeded worker.");
     worker.live_state = "review";
     worker.latest_event = {
       created_at: timestamp,
@@ -606,7 +809,6 @@ describe("WorkflowToolService status and selection", () => {
       result_message_id: "internal-result-message-id",
       sequence: 1,
     };
-    const run = required(root.job_runs[0], "Expected seeded run.");
     run.result_available = true;
     run.state = "review";
 
@@ -639,44 +841,17 @@ describe("WorkflowToolService status and selection", () => {
   test("exposes exact advertised content and guarded recovery actions only while available", async () => {
     const { root, service, state } = harness();
     await start(service);
-    state.markWorkerActive({
-      job: "research",
-      task_id: "child-1",
-      workflow_id: "internal-workflow-id",
-    });
-    root.job_runs.push({
-      job: "research",
-      result_available: true,
-      run_sequence: 1,
-      started_at: timestamp,
-      state: "review",
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-      write_grants: [],
-    });
-    root.workers.push({
-      child_session_id: "child-1",
+    const worker = required(root.workers[0], "Expected launched worker.");
+    worker.latest_event = {
       created_at: timestamp,
-      delivered_event_sequence: 0,
-      job: "research",
-      latest_event: {
-        created_at: timestamp,
-        kind: "result",
-        result_message_id: "assistant-result-1",
-        sequence: 1,
-      },
-      live_state: "review",
-      mode: "research",
-      parent_session_id: context.parent_session_id,
-      profile: "luna-max",
-      run_sequence: 1,
-      task_id: "child-1",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-    });
+      kind: "result",
+      result_message_id: "assistant-result-1",
+      sequence: 1,
+    };
+    worker.live_state = "review";
+    const run = required(root.job_runs[0], "Expected launched run.");
+    run.result_available = true;
+    run.state = "review";
     root.turns.push({
       boundary_message_id: "user-turn-1",
       completed_at: timestamp,
@@ -696,7 +871,7 @@ describe("WorkflowToolService status and selection", () => {
       result_message_id: "assistant-result-1",
       run_sequence: 1,
       started_at: timestamp,
-      task_id: "child-1",
+      task_id: worker.task_id,
       tool_outputs: [
         {
           message_id: "assistant-tool-1",
@@ -761,9 +936,7 @@ describe("WorkflowToolService status and selection", () => {
       message: "Reverted for review.",
       workflow_id: "internal-workflow-id",
     });
-    const worker = required(root.workers[0], "Expected seeded worker.");
     worker.live_state = "blocked";
-    const run = required(root.job_runs[0], "Expected seeded run.");
     run.state = "rejected";
     const turn = required(root.turns[0], "Expected seeded turn.");
     turn.undo_state = "redo_available";
@@ -781,41 +954,10 @@ describe("WorkflowToolService status and selection", () => {
   });
 
   test("advertises readable diff and completed tool output during an active turn only", async () => {
-    const { root, service, state } = harness();
+    const { root, service } = harness();
     await start(service);
-    state.markWorkerActive({
-      job: "research",
-      task_id: "child-active",
-      workflow_id: "internal-workflow-id",
-    });
-    root.job_runs.push({
-      job: "research",
-      result_available: false,
-      run_sequence: 1,
-      started_at: timestamp,
-      state: "active",
-      task_id: "child-active",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-      write_grants: [],
-    });
-    root.workers.push({
-      child_session_id: "child-active",
-      created_at: timestamp,
-      delivered_event_sequence: 0,
-      job: "research",
-      latest_event: null,
-      live_state: "busy",
-      mode: "research",
-      parent_session_id: context.parent_session_id,
-      profile: "luna-max",
-      run_sequence: 1,
-      task_id: "child-active",
-      updated_at: timestamp,
-      workflow_id: "internal-workflow-id",
-      workflow_version: 1,
-    });
+    const worker = required(root.workers[0], "Expected launched worker.");
+    worker.live_state = "busy";
     root.turns.push({
       boundary_message_id: "user-active-1",
       completed_at: null,
@@ -835,7 +977,7 @@ describe("WorkflowToolService status and selection", () => {
       result_message_id: null,
       run_sequence: 1,
       started_at: timestamp,
-      task_id: "child-active",
+      task_id: worker.task_id,
       tool_outputs: [
         {
           message_id: "assistant-active-tool",
@@ -934,63 +1076,9 @@ describe("WorkflowToolService status and selection", () => {
     ).toBe("completed");
   });
 
-  test("infers one ready worker and launches it without a model-visible handoff", async () => {
-    const { launches, service } = harness();
-    await start(service);
-
-    const status = await service.delegate({}, context);
-
-    expect(launches).toHaveLength(1);
-    expect(launches[0]?.definition_job.name).toBe("research");
-    expect(status.current?.steps[0]?.jobs[1]).toMatchObject({
-      live_state: "starting",
-      state: "active",
-    });
-    expect(JSON.stringify(status)).not.toMatch(nativeTaskIdentifierPattern);
-  });
-
-  test("requires a semantic selector when several workers are ready and preserves Sol choice", async () => {
-    const { service } = harness();
-    const multiWorkerSteps = structuredClone(
-      normalizeWorkflowDefinition({
-        objective: "Multiple ready workers",
-        steps: steps(),
-      }).steps
-    );
-    required(multiWorkerSteps[0], "Expected first step fixture.").jobs.push({
-      actor: { profile: "luna-medium", type: "worker" },
-      dependsOn: [],
-      mode: "verification",
-      name: "verify frame",
-      objective: "Verify the frame independently",
-    });
-    await service.start(
-      { objective: "Multiple ready workers", steps: multiWorkerSteps },
-      context
-    );
-
-    expect(service.delegate({}, context)).rejects.toThrow(
-      workerCandidatesPattern
-    );
-    await expect(service.delegate({}, context)).rejects.toThrow(
-      'workflow_delegate({ job: "research" })'
-    );
-    const selected = await service.delegate({ job: "verify frame" }, context);
-    expect(
-      selected.current?.steps[0]?.jobs.find(
-        (job) => job.name === "verify frame"
-      )
-    ).toMatchObject({ live_state: "starting", state: "active" });
-  });
-
   test("supports concurrent worker review and Sol completion in arbitrary order", async () => {
     const { service, state } = harness();
     await start(service);
-    state.markWorkerActive({
-      job: "research",
-      task_id: "task-research",
-      workflow_id: "internal-workflow-id",
-    });
     state.markWorkerReview({
       job: "research",
       result_available: true,
@@ -1029,12 +1117,23 @@ describe("WorkflowToolService status and selection", () => {
 
 describe("WorkflowToolService replacement and retry", () => {
   test("replacement after launch creates only one next version", async () => {
-    const { service, state } = harness();
+    const { launches, service, state } = harness();
     await start(service);
-    await service.delegate({}, context);
-    const replacement = steps();
+    const replacement = structuredClone(
+      normalizeWorkflowDefinition({
+        objective: "Exercise tool semantics",
+        steps: steps(),
+      }).steps
+    );
     required(replacement[2], "Expected replacement step fixture.").objective =
       "Make the corrected change";
+    required(replacement[0], "Expected first replacement step.").jobs.push({
+      actor: { profile: "luna-medium", type: "worker" },
+      dependsOn: [],
+      mode: "verification",
+      name: "verify framing",
+      objective: "Verify the retained framing independently",
+    });
 
     const status = await service.replace(
       {
@@ -1045,6 +1144,14 @@ describe("WorkflowToolService replacement and retry", () => {
     );
 
     expect(state.currentFor("parent-1", "sol")?.current_version).toBe(2);
+    expect(
+      launches.filter((launch) => launch.definition_job.name === "research")
+    ).toHaveLength(1);
+    expect(
+      launches.filter(
+        (launch) => launch.definition_job.name === "verify framing"
+      )
+    ).toHaveLength(1);
     expect(JSON.stringify(status)).not.toMatch(versionPattern);
   });
 
@@ -1054,11 +1161,6 @@ describe("WorkflowToolService replacement and retry", () => {
     state.blockJob({
       job: "frame",
       message: "Frame blocked.",
-      workflow_id: "internal-workflow-id",
-    });
-    state.markWorkerActive({
-      job: "research",
-      task_id: "task-research",
       workflow_id: "internal-workflow-id",
     });
     state.markWorkerReview({
@@ -1080,7 +1182,7 @@ describe("WorkflowToolService replacement and retry", () => {
         job: "research",
         workflow_id: "internal-workflow-id",
       })?.state
-    ).toBe("ready");
+    ).toBe("active");
     expect(state.currentFor("parent-1", "sol")?.current_version).toBe(1);
   });
 });

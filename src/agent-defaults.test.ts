@@ -48,12 +48,11 @@ test("leaves model and effort ownership to OpenCode profiles", () => {
   });
 });
 
-test("Sol permissions are generated from only the six clean-break workflow tools", () => {
+test("Sol permissions are generated from only the five clean-break workflow tools", () => {
   expect(workflowToolNames).toEqual([
     "workflow_start",
     "workflow_status",
     "workflow_complete",
-    "workflow_delegate",
     "workflow_replace",
     "workflow_retry",
   ]);
@@ -100,13 +99,16 @@ test("keeps harness mechanics in prompts and development methodology in applicab
     "ordinary terminal tools such as `rg`, globbing, and `jq`"
   );
   expect(sol).toContain("never injects the artifact body into your context");
-  expect(sol).toContain("atomically creates, scopes, binds, and starts");
+  expect(sol).toContain(
+    "creates, scopes, binds, and prompts that worker automatically"
+  );
   expect(sol).toContain("binds consequential execution");
   expect(sol).toContain("must help rather than imprison you");
   expect(sol).toContain("agents_status({ job? })");
   expect(sol).not.toContain("required_next_action");
   expect(sol).not.toContain("task_id");
   expect(sol).not.toContain("next_actions");
+  expect(sol).not.toContain("workflow_delegate");
   expect(sol).not.toMatch(DEVELOPMENT_METHOD_PATTERN);
   expect(worker).not.toMatch(DEVELOPMENT_METHOD_PATTERN);
   expect(worker).toContain(

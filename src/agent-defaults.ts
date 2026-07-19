@@ -14,7 +14,6 @@ export const workflowToolNames = [
   "workflow_start",
   "workflow_status",
   "workflow_complete",
-  "workflow_delegate",
   "workflow_replace",
   "workflow_retry",
 ] as const;

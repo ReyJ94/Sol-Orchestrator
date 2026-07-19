@@ -198,9 +198,6 @@ const lifecycleActions = (
       (job.actor.type === "orchestrator" && job.state === "active") ||
       (job.actor.type === "worker" && job.state === "review")
   );
-  const readyWorkers = jobs.filter(
-    (job) => job.actor.type === "worker" && job.state === "ready"
-  );
   const recoverable = jobs.filter(
     (job) => job.state === "review" || job.state === "blocked"
   );
@@ -212,16 +209,6 @@ const lifecycleActions = (
             "workflow_complete",
             completable.length === 1 ? {} : { job: job.name },
             ["message"]
-          ),
-          job: job.name,
-        }) satisfies LifecycleAction
-    ),
-    ...readyWorkers.map(
-      (job) =>
-        ({
-          action: action(
-            "workflow_delegate",
-            readyWorkers.length === 1 ? {} : { job: job.name }
           ),
           job: job.name,
         }) satisfies LifecycleAction
@@ -461,6 +448,9 @@ export const projectWorkflow = (
         objective: job.objective,
         result_available: runtime.result_available,
         state: runtime.state,
+        ...(runtime.latest_message === undefined
+          ? {}
+          : { status_message: runtime.latest_message }),
         turns: [],
         ...(job.writeFiles === undefined ? {} : { writeFiles: job.writeFiles }),
         ...(worker === undefined ? {} : projectWorker(root, worker, detail)),

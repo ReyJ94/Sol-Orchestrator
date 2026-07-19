@@ -96,10 +96,10 @@ boundary.
 ```
 
 Sol first understands enough of the task to design a useful workflow. It can
-then delegate ready jobs, work on its own jobs, supervise work in progress, and
-change the graph when evidence demands it. The harness keeps dependencies and
-available actions explicit, so Sol does not have to invent IDs, reconstruct
-protocol state, or guess which operation is legal next.
+then work on its own jobs while the harness launches ready workers, supervise
+work in progress, and change the graph when evidence demands it. The harness
+keeps dependencies and available actions explicit, so Sol does not have to
+invent IDs, reconstruct protocol state, or guess which operation is legal next.
 
 Waiting is a deliberate part of supervision. If the next decision truly
 depends on a worker, Sol can wait for a meaningful event without abandoning
@@ -189,8 +189,7 @@ the semantic controls Sol uses while running the workflow.
 | `goal_block` | Pause liveness at a genuine user or external boundary. |
 | `goal_resume` | Continue after the blocker is resolved. |
 | `workflow_status` | Read the current graph and the actions possible now. |
-| `workflow_start` | Start a complete semantic workflow. |
-| `workflow_delegate` | Assign and launch one ready worker job. |
+| `workflow_start` | Start a complete semantic workflow; ready workers launch automatically from the graph. |
 | `workflow_complete` | Complete Sol's job or accept a reviewed worker result. |
 | `workflow_retry` | Reopen one reviewed or blocked job without redesigning it. |
 | `workflow_replace` | Replace unfinished work with a new graph version. |

@@ -14,7 +14,6 @@ import { WorkflowDefinitionSchema } from "./src/schema/workflow.ts"
 
 const WORKFLOW_TOOLS = [
   "workflow_complete",
-  "workflow_delegate",
   "workflow_replace",
   "workflow_retry",
   "workflow_start",

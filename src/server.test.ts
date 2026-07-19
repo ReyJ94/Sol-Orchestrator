@@ -43,7 +43,7 @@ const WORKFLOW_STATUS_FIRST_PATTERN = /workflow_status\(\{\}\).*first/is;
 const WORKFLOW_REQUIRED_PATTERN = /read-only orientation.*workflow_start/is;
 const WORKFLOW_BINDING_PATTERN =
   /binding execution contract.*active orchestrator-owned job/is;
-const ATOMIC_DELEGATE_PATTERN = /workflow_delegate.*atomically/is;
+const AUTOMATIC_GRAPH_LAUNCH_PATTERN = /harness.*automatically.*dependencies/is;
 
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -135,6 +135,8 @@ class FakeSessions {
   statuses: Record<string, { type: "busy" | "idle" }> = {
     "child-1": { type: "busy" },
   };
+  statusCalls = 0;
+  statusGate: Promise<void> | undefined;
   created = 0;
   readonly removed: string[] = [];
 
@@ -281,8 +283,10 @@ class FakeSessions {
     });
   }
 
-  status(): Promise<Record<string, { type: "busy" | "idle" }>> {
-    return Promise.resolve(this.statuses);
+  async status(): Promise<Record<string, { type: "busy" | "idle" }>> {
+    this.statusCalls += 1;
+    await this.statusGate;
+    return this.statuses;
   }
 
   unrevert(sessionID: string): Promise<OpenCodeSession> {
@@ -303,6 +307,19 @@ const context = (sessionID: string, agent: string): ToolContext => ({
   sessionID,
   worktree: "/workspace",
 });
+
+const settlePluginRecovery = async (
+  plugin: Awaited<ReturnType<typeof SolOrchestratorPlugin>>
+): Promise<void> => {
+  await plugin["tool.execute.before"]?.(
+    {
+      callID: "recovery-barrier",
+      sessionID: "parent-1",
+      tool: "workflow_status",
+    },
+    { args: {} }
+  );
+};
 
 const backgroundInjection = (
   taskID: string,
@@ -470,7 +487,7 @@ const setupBoundWorker = async (
     },
   });
   if (options.bindWorker ?? true) {
-    await runtime.workflowService.delegate(
+    await runtime.workflowService.status(
       {},
       { agent: "sol", parent_session_id: "parent-1" }
     );
@@ -643,12 +660,51 @@ describe("Task 6 server lifecycle", () => {
     });
   });
 
-  test("composes the six workflow tools and installs bound worker permissions through the validated adapter seam", async () => {
+  test("config recovery automatically launches persisted ready workers once", async () => {
+    const { runtime, sessions } = await setupBoundWorker({ bindWorker: false });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+
+    await plugin.config?.({});
+    await plugin.config?.({});
+    await settlePluginRecovery(plugin);
+
+    expect(await workflowJobState(runtime.store)).toMatchObject({
+      state: "active",
+      task_id: "child-1",
+    });
+    expect(sessions.prompts).toHaveLength(1);
+  });
+
+  test("returns plugin hooks before non-empty restart reconciliation calls OpenCode", async () => {
+    const { runtime, sessions } = await setupBoundWorker();
+    let releaseStatus: (() => void) | undefined;
+    sessions.statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    sessions.statusCalls = 0;
+
+    const plugin = SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+
+    expect(plugin.tool.workflow_status).toBeDefined();
+    expect(sessions.statusCalls).toBe(0);
+
+    releaseStatus?.();
+    await settlePluginRecovery(plugin);
+
+    expect(sessions.statusCalls).toBeGreaterThan(0);
+  });
+
+  test("composes the five workflow tools and installs bound worker permissions through the validated adapter seam", async () => {
     const { runtime, sessions } = await setupBoundWorker();
 
     expect(Object.keys(runtime.workflowTools).sort()).toEqual([
       "workflow_complete",
-      "workflow_delegate",
       "workflow_replace",
       "workflow_retry",
       "workflow_start",
@@ -1127,10 +1183,11 @@ describe("Task 6 server lifecycle", () => {
       },
     });
 
-    await SolOrchestratorPlugin(
+    const plugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: restarted }
     );
+    await settlePluginRecovery(plugin);
 
     expect((await workflowJobState(store))?.state).toBe("review");
     expect(JSON.stringify(await store.readRoot())).not.toContain(
@@ -1269,7 +1326,7 @@ describe("binding workflow enforcement", () => {
         { callID: "native-task", sessionID: "parent-1", tool: "task" },
         { args: { subagent_type: "luna-medium" } }
       )
-    ).rejects.toThrow(ATOMIC_DELEGATE_PATTERN);
+    ).rejects.toThrow(AUTOMATIC_GRAPH_LAUNCH_PATTERN);
   });
 });
 
@@ -1424,10 +1481,11 @@ describe("native active-goal continuation", () => {
       },
     });
 
-    await SolOrchestratorPlugin(
+    const plugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime }
     );
+    await settlePluginRecovery(plugin);
     expect(sessions.promptAttempts).toBe(1);
     expect(sessions.prompts[0]?.messageID).toBe(
       "msg_019f00000000restart0000000"
@@ -1443,10 +1501,11 @@ describe("native active-goal continuation", () => {
         store,
       },
     });
-    await SolOrchestratorPlugin(
+    const restartedPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: restarted }
     );
+    await settlePluginRecovery(restartedPlugin);
     expect(sessions.promptAttempts).toBe(1);
   });
 
@@ -1906,6 +1965,7 @@ describe("Task 9 preemptive worker steering", () => {
     if (send === undefined || event === undefined) {
       throw new Error("Task 9 steering hooks must be registered.");
     }
+    await settlePluginRecovery(plugin);
 
     expect(
       JSON.parse(
@@ -2255,6 +2315,7 @@ describe("Task 9 preemptive worker steering", () => {
     if (event === undefined || send === undefined) {
       throw new Error("Task 9 steering lifecycle must be registered.");
     }
+    await settlePluginRecovery(plugin);
     await send.execute(
       {
         job: "implement worker lifecycle",
@@ -2418,10 +2479,11 @@ describe("Task 9 preemptive worker steering", () => {
         store: first.store,
       },
     });
-    await SolOrchestratorPlugin(
+    const firstPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: firstRestart }
     );
+    await settlePluginRecovery(firstPlugin);
     expect(first.sessions.prompts).toHaveLength(1);
 
     const secondRestart = createDefaultServerRuntime({
@@ -2434,10 +2496,11 @@ describe("Task 9 preemptive worker steering", () => {
         store: first.store,
       },
     });
-    await SolOrchestratorPlugin(
+    const secondPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: secondRestart }
     );
+    await settlePluginRecovery(secondPlugin);
     expect(first.sessions.prompts).toHaveLength(1);
     expect((await first.store.readRoot()).deliveries[0]?.state).toBe("started");
 
@@ -2496,10 +2559,11 @@ describe("Task 9 preemptive worker steering", () => {
         store: waiting.store,
       },
     });
-    await SolOrchestratorPlugin(
+    const waitingPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: waitingRestart }
     );
+    await settlePluginRecovery(waitingPlugin);
     expect(waiting.sessions.aborts).toEqual([]);
     expect(waiting.sessions.prompts).toEqual([]);
     expect(waitingDeferred).toEqual([]);
@@ -2534,10 +2598,11 @@ describe("Task 9 preemptive worker steering", () => {
         store: dispatched.store,
       },
     });
-    await SolOrchestratorPlugin(
+    const dispatchedPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: dispatchedRestart }
     );
+    await settlePluginRecovery(dispatchedPlugin);
     expect(dispatched.sessions.prompts).toEqual([
       {
         agent: "terra-medium",
@@ -2605,10 +2670,11 @@ describe("Task 9 preemptive worker steering", () => {
         store: started.store,
       },
     });
-    await SolOrchestratorPlugin(
+    const startedPlugin = await SolOrchestratorPlugin(
       { client: { session: {} }, directory: "/workspace" },
       { runtime: startedRestart }
     );
+    await settlePluginRecovery(startedPlugin);
     expect((await workflowJobState(started.store))?.state).toBe("review");
     expect((await started.store.readRoot()).deliveries[0]?.state).toBe(
       "completed"

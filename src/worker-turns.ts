@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile as nodeReadFile,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -400,7 +401,14 @@ export class WorkerTurns {
     const artifactDirectory = options.artifactDirectory;
     this.#artifactRoot =
       artifactDirectory === undefined
-        ? mkdtemp(path.join(os.tmpdir(), "opencode-sol-worker-artifacts-"))
+        ? mkdir(path.join(os.tmpdir(), "opencode"), {
+            recursive: true,
+          }).then(
+            async () =>
+              await mkdtemp(
+                path.join(os.tmpdir(), "opencode", "sol-orchestrator-")
+              )
+          )
         : mkdir(artifactDirectory, { mode: 0o700, recursive: true }).then(
             async () => {
               await chmod(artifactDirectory, 0o700);
@@ -1099,6 +1107,14 @@ export class WorkerTurns {
     };
   }
 
+  async cleanupWorkflow(workflowID: string): Promise<void> {
+    const root = await this.#artifactRoot;
+    await rm(this.#workflowArtifactDirectory(root, workflowID), {
+      force: true,
+      recursive: true,
+    });
+  }
+
   async #materializeInspection(
     input: InspectInput,
     worker: WorkerBindingRecord,
@@ -1107,7 +1123,7 @@ export class WorkerTurns {
   ) {
     const root = await this.#artifactRoot;
     const directory = path.join(
-      root,
+      this.#workflowArtifactDirectory(root, worker.workflow_id),
       `${artifactSlug(worker.job)}-${sha256(worker.task_id).slice(0, 10)}`,
       `turn-${turn.turn}`
     );
@@ -1137,6 +1153,10 @@ export class WorkerTurns {
       path: artifactPath,
       sha256: sha256(content),
     };
+  }
+
+  #workflowArtifactDirectory(root: string, workflowID: string): string {
+    return path.join(root, `workflow-${sha256(workflowID).slice(0, 16)}`);
   }
 
   async wait(input: unknown) {

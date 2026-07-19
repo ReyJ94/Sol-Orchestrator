@@ -50,6 +50,7 @@ type JobSummary = {
   };
   readonly result_available: boolean;
   readonly state: string;
+  readonly status_message?: string;
   readonly turns: readonly TurnSummary[];
   readonly writeFiles?: readonly string[];
   readonly write_grants?: readonly string[];
@@ -235,6 +236,7 @@ const jobDescription = (job: JobSummary): string =>
     job.live_state,
     job.result_available ? "result available" : undefined,
     job.latest_event?.message,
+    job.status_message,
     job.pending_write_permission
       ? `permission: ${job.pending_write_permission.tool} ${job.pending_write_permission.paths.join(", ")}`
       : undefined,

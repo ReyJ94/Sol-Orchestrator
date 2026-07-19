@@ -14,11 +14,12 @@ afterEach(() => {
 
 const workflow = ({
   state = "active",
-  jobState = "ready",
-  liveState,
+  jobState = "active",
+  liveState = "starting",
   latestEvent,
   resultAvailable = false,
-  availableActions = [{ args: {}, tool: "workflow_delegate" }],
+  statusMessage,
+  availableActions = [],
 } = {}) => ({
   available_actions: availableActions,
   objective: "Ship the simplified orchestration pipeline.",
@@ -35,6 +36,7 @@ const workflow = ({
           objective: "Verify the final public seam.",
           result_available: resultAvailable,
           state: jobState,
+          status_message: statusMessage,
           turns:
             liveState === "review"
               ? [
@@ -208,7 +210,7 @@ test("shows the exact workflow_start call when no workflow exists", async () => 
   );
 });
 
-test("renders active steps and jobs with the available delegation action", async () => {
+test("renders a worker automatically launched by the active graph", async () => {
   const harness = createApi();
   await createSolOrchestratorTuiPlugin({
     readWorkflow: async () => workflow(),
@@ -222,8 +224,7 @@ test("renders active steps and jobs with the available delegation action", async
   expect(dialog.props.options.map((option) => option.title)).toEqual(
     expect.arrayContaining([
       "Step · verify · active",
-      "  Job · verify simplified boundary · ready",
-      "Available · workflow_delegate({})",
+      "  Job · verify simplified boundary · active",
     ])
   );
   expect(dialog.props.options[1].description).toContain(
@@ -257,10 +258,6 @@ test("renders a blocked workflow with its blocker and exact retry call", async (
     readWorkflow: async () =>
       workflow({
         jobState: "blocked",
-        latestEvent: {
-          kind: "blocker",
-          message: "The native permission disappeared.",
-        },
         liveState: "blocked",
         availableActions: [
           {
@@ -270,6 +267,7 @@ test("renders a blocked workflow with its blocker and exact retry call", async (
           },
         ],
         state: "blocked",
+        statusMessage: "The native permission disappeared.",
       }),
   })(harness.api);
   const app = await renderControl(harness);

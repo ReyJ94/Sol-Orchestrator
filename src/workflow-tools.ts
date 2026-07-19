@@ -14,7 +14,7 @@ import {
   type WorkflowJob,
   WorkflowStepSchema,
 } from "./schema/workflow.js";
-import { normalizeWorkflowDefinition, workflowJob } from "./workflow-graph.js";
+import { normalizeWorkflowDefinition } from "./workflow-graph.js";
 import { projectWorkflowStatus } from "./workflow-projection.js";
 import type {
   WorkflowRecord,
@@ -39,10 +39,6 @@ const WorkflowCompleteInputSchema = z
     job: SemanticSelectorSchema.optional(),
     message: MessageSchema,
   })
-  .strict();
-
-const WorkflowDelegateInputSchema = z
-  .object({ job: SemanticSelectorSchema.optional() })
   .strict();
 
 const WorkflowReplaceInputSchema = z
@@ -101,6 +97,7 @@ type WorkflowToolContext = {
 
 type WorkflowToolServiceOptions = {
   readonly available_workers?: () => readonly WorkerProfileDescriptor[];
+  readonly cleanup_workflow?: (workflow_id: string) => Promise<void>;
   readonly create_id?: () => string;
   readonly refresh_workers?: (parent_session_id: string) => Promise<void>;
   readonly store: WorkflowStore;
@@ -167,7 +164,9 @@ const selectSemanticJob = (
 
 export class WorkflowToolService {
   readonly #availableWorkers: () => readonly WorkerProfileDescriptor[];
+  readonly #cleanupWorkflow?: (workflow_id: string) => Promise<void>;
   readonly #createID: () => string;
+  readonly #dispatches = new Map<string, Promise<void>>();
   readonly #refreshWorkers?: (parent_session_id: string) => Promise<void>;
   readonly #store: WorkflowStore;
   readonly #workers: WorkflowWorkerLauncher;
@@ -175,6 +174,7 @@ export class WorkflowToolService {
   constructor(options: WorkflowToolServiceOptions) {
     this.#availableWorkers =
       options.available_workers ?? (() => bundledWorkerProfiles);
+    this.#cleanupWorkflow = options.cleanup_workflow;
     this.#createID = options.create_id ?? randomUUID;
     this.#refreshWorkers = options.refresh_workers;
     this.#store = options.store;
@@ -206,6 +206,7 @@ export class WorkflowToolService {
     WorkflowStatusInputSchema.parse(input);
     const parsedContext = this.#context(context);
     await this.#refreshWorkers?.(parsedContext.parent_session_id);
+    await this.#dispatchReadyWorkers(parsedContext);
     return projectWorkflowStatus(
       await this.#store.readRoot(),
       parsedContext,
@@ -216,7 +217,7 @@ export class WorkflowToolService {
   async complete(input: unknown, context: unknown) {
     const parsedContext = this.#context(context);
     const parsed = WorkflowCompleteInputSchema.parse(input);
-    await this.#store.mutateWorkflow((state) => {
+    const completion = await this.#store.mutateWorkflow((state) => {
       const current = this.#current(state, parsedContext);
       const version = currentVersion(current);
       const candidates = version.definition.steps.flatMap((step) =>
@@ -242,50 +243,21 @@ export class WorkflowToolService {
         message: parsed.message,
         workflow_id: current.workflow_id,
       });
-    });
-    return await this.status({}, parsedContext);
-  }
-
-  async delegate(input: unknown, context: unknown) {
-    const parsedContext = this.#context(context);
-    const parsed = WorkflowDelegateInputSchema.parse(input);
-    const launch = await this.#store.readWorkflow((state) => {
-      const current = this.#current(state, parsedContext);
-      const version = currentVersion(current);
-      const candidates = version.definition.steps.flatMap((step) =>
-        step.jobs
-          .filter(
-            (job) =>
-              job.actor.type === "worker" &&
-              version.job_states[job.name]?.state === "ready"
-          )
-          .map((job) => job.name)
-      );
-      const jobName = selectSemanticJob(
-        "workflow_delegate",
-        parsed.job,
-        candidates
-      );
-      const selected = workflowJob(version.definition, jobName);
-      if (
-        selected.job.actor.type !== "worker" ||
-        selected.job.mode === undefined
-      ) {
-        throw new Error(`Job ${jobName} is not a worker job.`);
-      }
-      this.#assertAvailableProfiles({
-        objective: version.definition.objective,
-        steps: [selected.step],
-      });
+      const completed = state
+        .snapshot()
+        .workflows.find(
+          (workflow) => workflow.workflow_id === current.workflow_id
+        );
       return {
-        definition_job: selected.job as WorkerJob,
-        parent_session_id: current.parent_session_id,
-        step: selected.step.name,
+        completed: completed?.current === false,
         workflow_id: current.workflow_id,
-        workflow_version: current.current_version,
       };
     });
-    await this.#workers.launch(launch);
+    if (completion.completed) {
+      await this.#cleanupWorkflow?.(completion.workflow_id).catch(
+        () => undefined
+      );
+    }
     return await this.status({}, parsedContext);
   }
 
@@ -333,6 +305,99 @@ export class WorkflowToolService {
       });
     });
     return await this.status({}, parsedContext);
+  }
+
+  async recoverReadyWorkers(): Promise<void> {
+    const root = await this.#store.readRoot();
+    await Promise.all(
+      root.workflows.workflows
+        .filter((workflow) => workflow.current)
+        .map((workflow) =>
+          this.#dispatchReadyWorkers({
+            agent: workflow.orchestrator_agent_id,
+            parent_session_id: workflow.parent_session_id,
+          })
+        )
+    );
+  }
+
+  async #dispatchReadyWorkers(context: WorkflowToolContext): Promise<void> {
+    const key = `${context.parent_session_id}\u0000${context.agent}`;
+    const previous = this.#dispatches.get(key) ?? Promise.resolve();
+    const dispatch = previous
+      .catch(() => undefined)
+      .then(async () => await this.#drainReadyWorkers(context));
+    this.#dispatches.set(key, dispatch);
+    try {
+      await dispatch;
+    } finally {
+      if (this.#dispatches.get(key) === dispatch) {
+        this.#dispatches.delete(key);
+      }
+    }
+  }
+
+  async #drainReadyWorkers(context: WorkflowToolContext): Promise<void> {
+    const launches = await this.#store.readWorkflow((state) => {
+      const current = state.currentFor(
+        context.parent_session_id,
+        context.agent
+      );
+      if (current === undefined) {
+        return [];
+      }
+      const version = currentVersion(current);
+      return version.definition.steps.flatMap((step) =>
+        step.jobs.flatMap((job) => {
+          if (
+            job.actor.type !== "worker" ||
+            job.mode === undefined ||
+            version.job_states[job.name]?.state !== "ready"
+          ) {
+            return [];
+          }
+          return [
+            {
+              definition_job: job as WorkerJob,
+              parent_session_id: current.parent_session_id,
+              step: step.name,
+              workflow_id: current.workflow_id,
+              workflow_version: current.current_version,
+            },
+          ];
+        })
+      );
+    });
+    await Promise.all(
+      launches.map(async (launch) => {
+        try {
+          await this.#workers.launch(launch);
+        } catch {
+          await this.#store.mutateWorkflow((state) => {
+            const current = state
+              .snapshot()
+              .workflows.find(
+                (workflow) => workflow.workflow_id === launch.workflow_id
+              );
+            const version = current?.versions.find(
+              (candidate) => candidate.version === launch.workflow_version
+            );
+            if (
+              current?.current === true &&
+              current.current_version === launch.workflow_version &&
+              version?.job_states[launch.definition_job.name]?.state === "ready"
+            ) {
+              state.blockJob({
+                job: launch.definition_job.name,
+                message:
+                  "OpenCode could not launch this managed worker. Retry the unchanged job or replace the workflow.",
+                workflow_id: launch.workflow_id,
+              });
+            }
+          });
+        }
+      })
+    );
   }
 
   #context(input: unknown): WorkflowToolContext {
@@ -394,14 +459,6 @@ export const createWorkflowToolDefinitions = (
       "Complete one active Sol job or accept one worker job in review using its authored semantic name when selection is ambiguous.",
     async execute(args, context) {
       return toolResult(await service.complete(args, toolContext(context)));
-    },
-  }),
-  workflow_delegate: tool({
-    args: WorkflowDelegateInputSchema.shape,
-    description:
-      "Atomically launch one authored ready worker through a native OpenCode child session and return refreshed workflow state.",
-    async execute(args, context) {
-      return toolResult(await service.delegate(args, toolContext(context)));
     },
   }),
   workflow_replace: tool({
