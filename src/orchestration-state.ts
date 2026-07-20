@@ -11,6 +11,24 @@ import { isCoalescibleDeliveryState } from "./schema/orchestration.js";
 import type { WorkflowState } from "./workflow-state.js";
 
 const EventMessageSchema = z.string().trim().min(1).max(8000);
+const NativeStatusSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("busy") }).strict(),
+  z.object({ type: z.literal("idle") }).strict(),
+  z
+    .object({
+      attempt: z.int().nonnegative(),
+      message: EventMessageSchema.max(4000),
+      next: z.number().finite(),
+      type: z.literal("retry"),
+    })
+    .strip(),
+]);
+const ReconcileStatusSchema = z.union([
+  NativeStatusSchema,
+  z.enum(["busy", "idle"]).transform((type) => ({ type })),
+  z.literal("missing"),
+]);
+type ReconcileStatus = z.output<typeof ReconcileStatusSchema>;
 const ADDITIONAL_STEERING_SEPARATOR =
   "\n\n--- Additional priority steering received before dispatch; later instruction takes precedence on conflict ---\n";
 
@@ -64,7 +82,7 @@ const ReconcileSchema = z
   .object({
     child_exists: z.boolean(),
     final_message_id: ExternalIdSchema.nullable(),
-    status: z.enum(["busy", "idle", "missing"]),
+    status: ReconcileStatusSchema,
     task_id: ExternalIdSchema,
   })
   .strict()
@@ -198,6 +216,17 @@ export class OrchestrationState {
       parsed.parent_session_id,
       parsed.task_id
     );
+    if (
+      worker.live_state === "review" &&
+      worker.latest_event?.kind === "result"
+    ) {
+      return {
+        completed: true as const,
+        interrupted: false as const,
+        result_available: true as const,
+        task_id: worker.task_id,
+      };
+    }
     if (worker.live_state === "interrupted") {
       this.#removeDelivery(state.root, worker.task_id);
       return { interrupted: true as const, task_id: worker.task_id };
@@ -419,18 +448,12 @@ export class OrchestrationState {
       return { action: "review" as const, task_id: worker.task_id };
     }
     if (delivery !== undefined) {
-      const updatedAt = this.#now();
-      worker.live_state =
-        delivery.state === "started" && parsed.status === "busy"
-          ? "busy"
-          : "preempting";
-      worker.updated_at = updatedAt;
-      this.#activeRun(state.root, worker).updated_at = updatedAt;
-      return {
-        action: "resume_delivery" as const,
-        delivery: delivery.state,
-        task_id: worker.task_id,
-      };
+      return this.#reconcileDelivery(
+        state.root,
+        worker,
+        delivery,
+        parsed.status
+      );
     }
     if (worker.live_state === "review") {
       return { action: "review" as const, task_id: worker.task_id };
@@ -443,12 +466,18 @@ export class OrchestrationState {
       });
       return { action: "review" as const, task_id: worker.task_id };
     }
-    if (parsed.status === "busy") {
-      const updatedAt = this.#now();
-      worker.live_state = "busy";
-      worker.updated_at = updatedAt;
-      this.#activeRun(state.root, worker).updated_at = updatedAt;
-      return { action: "busy" as const, task_id: worker.task_id };
+    if (parsed.status !== "missing" && parsed.status.type !== "idle") {
+      this.setLiveState(state.root, {
+        status: parsed.status,
+        task_id: worker.task_id,
+      });
+      return {
+        action:
+          parsed.status.type === "retry"
+            ? ("retrying" as const)
+            : ("busy" as const),
+        task_id: worker.task_id,
+      };
     }
     this.#block(
       state,
@@ -463,9 +492,13 @@ export class OrchestrationState {
 
   setLiveState(
     root: RootSnapshot,
-    input: { readonly state: "busy" | "idle"; readonly task_id: string }
+    input: { readonly status: unknown; readonly task_id: string }
   ): void {
-    const worker = this.#worker(root, ExternalIdSchema.parse(input.task_id));
+    const parsed = {
+      status: NativeStatusSchema.parse(input.status),
+      task_id: ExternalIdSchema.parse(input.task_id),
+    };
+    const worker = this.#worker(root, parsed.task_id);
     if (
       worker.live_state === "review" ||
       worker.live_state === "blocked" ||
@@ -475,12 +508,45 @@ export class OrchestrationState {
     }
     const updatedAt = this.#now();
     const delivery = this.#delivery(root, worker.task_id);
-    worker.live_state =
-      delivery !== undefined && delivery.state !== "started"
-        ? "preempting"
-        : input.state;
+    if (parsed.status.type === "retry") {
+      worker.live_state = "retrying";
+      if (delivery !== undefined && delivery.state !== "started") {
+        worker.live_state = "preempting";
+      }
+      worker.updated_at = updatedAt;
+      this.#activeRun(root, worker).updated_at = updatedAt;
+      return;
+    }
+    let liveState: "busy" | "idle" | "preempting" | "starting" =
+      parsed.status.type;
+    if (delivery !== undefined && delivery.state !== "started") {
+      liveState = "preempting";
+    }
+    worker.live_state = liveState;
     worker.updated_at = updatedAt;
     this.#activeRun(root, worker).updated_at = updatedAt;
+  }
+
+  #reconcileDelivery(
+    root: RootSnapshot,
+    worker: WorkerBindingRecord,
+    delivery: PendingDeliveryRecord,
+    status: ReconcileStatus
+  ) {
+    const updatedAt = this.#now();
+    worker.live_state =
+      delivery.state === "started" &&
+      status !== "missing" &&
+      status.type === "busy"
+        ? "busy"
+        : "preempting";
+    worker.updated_at = updatedAt;
+    this.#activeRun(root, worker).updated_at = updatedAt;
+    return {
+      action: "resume_delivery" as const,
+      delivery: delivery.state,
+      task_id: worker.task_id,
+    };
   }
 
   worker(root: RootSnapshot, taskID: string): WorkerBindingRecord {

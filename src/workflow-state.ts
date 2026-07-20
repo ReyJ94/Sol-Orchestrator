@@ -153,6 +153,23 @@ export class WorkflowState {
     return record === undefined ? undefined : clone(record);
   }
 
+  attachGoal(input: {
+    readonly goal_id: string;
+    readonly workflow_id: string;
+  }): WorkflowRecord {
+    const record = this.#record(input.workflow_id);
+    if (!record.current) {
+      throw new Error("A completed workflow cannot be attached to a goal.");
+    }
+    if (record.goal_id !== undefined && record.goal_id !== input.goal_id) {
+      throw new Error(
+        "The current workflow is already attached to another goal."
+      );
+    }
+    (record as { goal_id?: string }).goal_id = input.goal_id;
+    return clone(record);
+  }
+
   removeGoalWorkflows(goalID: string): string[] {
     const associated = this.#workflows.filter(
       (workflow) => workflow.goal_id === goalID
@@ -367,6 +384,7 @@ export class WorkflowState {
   }
 
   replace(input: {
+    readonly objective?: string;
     readonly reason: string;
     readonly steps: WorkflowDefinition["steps"];
     readonly workflow_id: string;
@@ -381,7 +399,7 @@ export class WorkflowState {
     }
     const previous = this.#version(record);
     const definition = normalizeWorkflowDefinition({
-      objective: previous.definition.objective,
+      objective: input.objective ?? previous.definition.objective,
       steps: input.steps,
     });
     const now = this.#now();

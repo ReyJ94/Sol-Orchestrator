@@ -47,19 +47,22 @@ export class GoalToolService {
     const parsed = GoalStartInputSchema.parse(input);
     const owner = this.#context(context);
     await this.#store.mutateRoot(({ goal, workflow }) => {
-      if (
-        workflow.currentFor(owner.parent_session_id, owner.agent) !== undefined
-      ) {
-        throw new Error(
-          "Finish or stop the current workflow before starting a durable goal."
-        );
-      }
-      goal.start({
+      const currentWorkflow = workflow.currentFor(
+        owner.parent_session_id,
+        owner.agent
+      );
+      const created = goal.start({
         goal_id: this.#createID(),
         objective: parsed.objective,
         orchestrator_agent_id: owner.agent,
         parent_session_id: owner.parent_session_id,
       });
+      if (currentWorkflow !== undefined) {
+        workflow.attachGoal({
+          goal_id: created.goal_id,
+          workflow_id: currentWorkflow.workflow_id,
+        });
+      }
     });
     return await this.status(owner);
   }
@@ -178,7 +181,7 @@ export const createGoalToolDefinitions = (service: GoalToolService) => ({
   goal_start: tool({
     args: GoalStartInputSchema.shape,
     description:
-      "Start a durable goal only when the user explicitly asks for persistent goal execution.",
+      "Start a durable goal before its first workflow or promote one current unassociated workflow.",
     async execute(args, context) {
       return toolResult(await service.start(args, toolContext(context)));
     },

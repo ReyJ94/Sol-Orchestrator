@@ -43,7 +43,7 @@ const steps = () => [
       },
       {
         actor: {
-          profile: "luna-max" as const,
+          profile: "terra-max" as const,
           type: "worker" as const,
         },
         mode: "research" as const,
@@ -96,10 +96,6 @@ const bundledProfiles = [
   {
     description: "Clear low-risk leaf work",
     profile: "luna-medium",
-  },
-  {
-    description: "Careful narrow leaf work",
-    profile: "luna-max",
   },
   {
     description: "Cross-file leaf work",
@@ -249,7 +245,7 @@ describe("workflow tool definitions", () => {
     expect(output.current.steps[0].jobs[1]).toMatchObject({
       job: "research",
       live_state: "starting",
-      profile: "luna-max",
+      profile: "terra-max",
       state: "active",
     });
     expect(JSON.stringify(output)).not.toContain("required_next_action");
@@ -332,7 +328,7 @@ describe("graph-driven worker execution", () => {
                 objective: "Inspect runtime behavior",
               },
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 mode: "verification",
                 name: "verify contract",
                 objective: "Verify the installed contract",
@@ -370,7 +366,7 @@ describe("graph-driven worker execution", () => {
           {
             jobs: [
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 mode: "research",
                 name: "research owner",
                 objective: "Research the owner",
@@ -442,7 +438,7 @@ describe("graph-driven worker execution", () => {
                 objective: "Run the healthy verification",
               },
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 mode: "research",
                 name: "unavailable worker",
                 objective: "Exercise launch failure",
@@ -680,6 +676,28 @@ describe("WorkflowToolService status and selection", () => {
       status: "active",
     });
     expect(JSON.stringify(status)).not.toContain("internal-goal-id");
+  });
+
+  test("creates and associates a durable goal when actionable work starts without one", async () => {
+    const { service, store } = harness();
+
+    const status = await start(service);
+    const root = await store.readRoot();
+
+    expect(root.goals.goals).toEqual([
+      expect.objectContaining({
+        objective: "Exercise tool semantics",
+        status: "active",
+      }),
+    ]);
+    expect(root.workflows.workflows[0]?.goal_id).toBe(
+      root.goals.goals[0]?.goal_id
+    );
+    expect(status.goal).toEqual({
+      objective: "Exercise tool semantics",
+      status: "active",
+    });
+    expect(JSON.stringify(status)).not.toContain("internal-workflow-id");
   });
 
   test("joins bounded worker decision metadata into its semantic job", async () => {
@@ -1153,6 +1171,43 @@ describe("WorkflowToolService replacement and retry", () => {
       )
     ).toHaveLength(1);
     expect(JSON.stringify(status)).not.toMatch(versionPattern);
+  });
+
+  test("updates the workflow and associated durable goal objective on a scope change", async () => {
+    const { service, store } = harness();
+    await start(service);
+
+    const status = await service.replace(
+      {
+        objective: "Deliver the revised user outcome",
+        reason: "The user replaced the original requested outcome.",
+        steps: steps(),
+      },
+      context
+    );
+    const root = await store.readRoot();
+
+    expect(status.current?.objective).toBe("Deliver the revised user outcome");
+    expect(status.goal?.objective).toBe("Deliver the revised user outcome");
+    expect(root.goals.goals[0]?.objective).toBe(
+      "Deliver the revised user outcome"
+    );
+  });
+
+  test("preserves the existing objective when replacement omits it", async () => {
+    const { service } = harness();
+    await start(service);
+
+    const status = await service.replace(
+      {
+        reason: "Only the unfinished hierarchy changed.",
+        steps: steps(),
+      },
+      context
+    );
+
+    expect(status.current?.objective).toBe("Exercise tool semantics");
+    expect(status.goal?.objective).toBe("Exercise tool semantics");
   });
 
   test("retries one blocked/review job and requires semantic selection when ambiguous", async () => {

@@ -46,8 +46,32 @@ export const OpenCodeSessionStatusSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("busy") }).strict(),
   z
     .object({
+      action: z
+        .object({
+          label: z.string().trim().min(1).max(1000),
+          link: z.string().trim().min(1).max(4000).optional(),
+          message: z.string().trim().min(1).max(4000),
+          provider: z.string().trim().min(1).max(512),
+          reason: z.string().trim().min(1).max(512),
+          title: z.string().trim().min(1).max(1000),
+        })
+        .strict()
+        .optional(),
       attempt: z.int().nonnegative(),
-      message: z.string(),
+      message: z
+        .string()
+        .trim()
+        .min(1)
+        .max(4000)
+        .transform((message) =>
+          message
+            .replace(
+              /\s*Please include the request ID [0-9a-z-]+ in your message\.?/giu,
+              ""
+            )
+            .slice(0, 1000)
+        )
+        .pipe(z.string().trim().min(1)),
       next: z.number().finite(),
       type: z.literal("retry"),
     })

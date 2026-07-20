@@ -10,6 +10,7 @@ import type {
   OpenCodeMessageRecord,
   OpenCodePermissionRequest,
   OpenCodeSession,
+  OpenCodeSessionStatus,
 } from "./opencode-session.js";
 import { OrchestrationStore } from "./orchestration-store.js";
 import type { WorkflowDefinition } from "./schema/workflow.js";
@@ -38,7 +39,7 @@ const MULTIPLE_PERMISSION_PATTERN = /pending.*agents_interrupt/u;
 const OPENCODE_MESSAGE_ID_PATTERN = /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/u;
 const ALREADY_CLEARED_PATTERN = /already.*cleared|cleared.*already/i;
 const ALREADY_PERSISTED_PATTERN = /already persisted/i;
-const GOAL_COMMAND_USAGE_PATTERN = /usage.*goal/i;
+const GOAL_STATUS_PATTERN = /durable goal.*status|goal.*workflow status/i;
 const WORKFLOW_STATUS_FIRST_PATTERN = /workflow_status\(\{\}\).*first/is;
 const WORKFLOW_REQUIRED_PATTERN = /read-only orientation.*workflow_start/is;
 const WORKFLOW_BINDING_PATTERN =
@@ -132,7 +133,7 @@ class FakeSessions {
   permissionReplyFailure: Error | undefined;
   permissionRequests: OpenCodePermissionRequest[] = [];
   promptFailure: Error | undefined;
-  statuses: Record<string, { type: "busy" | "idle" }> = {
+  statuses: Record<string, OpenCodeSessionStatus> = {
     "child-1": { type: "busy" },
   };
   statusCalls = 0;
@@ -283,7 +284,7 @@ class FakeSessions {
     });
   }
 
-  async status(): Promise<Record<string, { type: "busy" | "idle" }>> {
+  async status(): Promise<Record<string, OpenCodeSessionStatus>> {
     this.statusCalls += 1;
     await this.statusGate;
     return this.statuses;
@@ -820,12 +821,28 @@ describe("Task 6 server lifecycle", () => {
         type: "text",
       },
     ]);
-    await expect(
-      before(
-        { arguments: "   ", command: "goal", sessionID: "parent-2" },
-        { parts: [] }
-      )
-    ).rejects.toThrow(GOAL_COMMAND_USAGE_PATTERN);
+    const absentOutput = {
+      parts: [{ text: "configured template", type: "text" }],
+    };
+    await before(
+      { arguments: "   ", command: "goal", sessionID: "parent-2" },
+      absentOutput
+    );
+    expect(absentOutput.parts[0]?.text).toMatch(GOAL_STATUS_PATTERN);
+    expect(absentOutput.parts[0]?.text).toContain("No durable goal");
+
+    const activeOutput = {
+      parts: [{ text: "configured template", type: "text" }],
+    };
+    await before(
+      { arguments: "", command: "goal", sessionID: "parent-1" },
+      activeOutput
+    );
+    expect(activeOutput.parts[0]?.text).toMatch(GOAL_STATUS_PATTERN);
+    expect(activeOutput.parts[0]?.text).toContain(
+      "Deliver the complete multi-workflow outcome"
+    );
+    expect(JSON.stringify(activeOutput)).not.toContain("goal-from-command");
   });
 
   test("keeps the complete goal scope when an associated worker cannot be aborted", async () => {
@@ -1139,6 +1156,137 @@ describe("Task 6 server lifecycle", () => {
     expect(sessions.aborts).toEqual(["child-1"]);
     expect((await workflowJobState(store))?.state).toBe("blocked");
     expect(output).not.toMatch(INTERRUPT_INTERNAL_PATTERN);
+  });
+
+  test("preserves a completed worker result when final history races permanent interrupt", async () => {
+    const { runtime, sessions, store } = await setupBoundWorker();
+    sessions.statuses = { "child-1": { type: "idle" } };
+    sessions.messageRecords.set("child-1", [
+      {
+        info: {
+          id: "worker-user-before-interrupt",
+          role: "user",
+          sessionID: "child-1",
+          time: { created: 1 },
+        },
+        parts: [],
+      },
+      {
+        info: {
+          finish: "stop",
+          id: "worker-final-before-interrupt",
+          parentID: "worker-user-before-interrupt",
+          role: "assistant",
+          sessionID: "child-1",
+          time: { completed: 3, created: 2 },
+        },
+        parts: [
+          {
+            id: "worker-final-before-interrupt-part",
+            messageID: "worker-final-before-interrupt",
+            sessionID: "child-1",
+            text: "Useful completed result.",
+            type: "text",
+          },
+        ],
+      },
+    ]);
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const interrupt = plugin.tool.agents_interrupt;
+    if (interrupt === undefined) {
+      throw new Error("agents_interrupt must be registered.");
+    }
+
+    const output = JSON.parse(
+      String(
+        await interrupt.execute(
+          {
+            job: "implement worker lifecycle",
+            reason: "Stop only if work is still running.",
+          },
+          context("parent-1", "sol")
+        )
+      )
+    );
+
+    expect(output).toEqual({
+      completed: true,
+      interrupted: false,
+      job: "implement worker lifecycle",
+    });
+    expect(sessions.aborts).toEqual([]);
+    expect((await workflowJobState(store))?.state).toBe("review");
+    expect((await store.readRoot()).workers[0]?.latest_event).toMatchObject({
+      kind: "result",
+      result_message_id: "worker-final-before-interrupt",
+    });
+  });
+
+  test("wakes an idle goal parent when a worker final becomes reviewable", async () => {
+    const { runtime, sessions, store } = await setupBoundWorker({
+      withGoal: true,
+    });
+    sessions.sessionRecords.set("parent-1", sessionRecord("parent-1", "root"));
+    sessions.statuses["parent-1"] = { type: "idle" };
+    const parent = parentAssistant("msg_parent_before_worker_final");
+    sessions.messageRecords.set("parent-1", [parent]);
+    sessions.messageRecords.set("child-1", [
+      {
+        info: {
+          id: "worker-user-final-wake",
+          role: "user",
+          sessionID: "child-1",
+          time: { created: 1 },
+        },
+        parts: [],
+      },
+      {
+        info: {
+          finish: "stop",
+          id: "worker-final-wake",
+          parentID: "worker-user-final-wake",
+          role: "assistant",
+          sessionID: "child-1",
+          time: { completed: 3, created: 2 },
+        },
+        parts: [
+          {
+            id: "worker-final-wake-part",
+            messageID: "worker-final-wake",
+            sessionID: "child-1",
+            text: "Bounded final result.",
+            type: "text",
+          },
+        ],
+      },
+    ]);
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+
+    await plugin.event?.({
+      event: {
+        properties: {
+          info: {
+            finish: "stop",
+            id: "worker-final-wake",
+            parentID: "worker-user-final-wake",
+            role: "assistant",
+            sessionID: "child-1",
+            time: { completed: 3, created: 2 },
+          },
+        },
+        type: "message.updated",
+      },
+    });
+
+    expect((await workflowJobState(store))?.state).toBe("review");
+    expect(sessions.promptAttempts).toBe(1);
+    expect(sessions.prompts[0]?.sessionID).toBe("parent-1");
   });
 
   test("reconciles an idle bound child with one completed assistant message after restart", async () => {
@@ -1605,6 +1753,34 @@ describe("native active-goal continuation", () => {
 });
 
 describe("Task 7 pull-based worker controls", () => {
+  test("projects native provider retries as status without inventing a worker message", async () => {
+    const { runtime, store } = await setupBoundWorker();
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+
+    await plugin.event?.({
+      event: {
+        properties: {
+          sessionID: "child-1",
+          status: {
+            attempt: 2,
+            message: "Provider request failed and will be retried.",
+            next: Date.parse("2026-07-17T12:00:05.000Z"),
+            type: "retry",
+          },
+        },
+        type: "session.status",
+      },
+    });
+
+    const worker = (await store.readRoot()).workers[0];
+    expect(worker).toMatchObject({
+      latest_event: null,
+      live_state: "retrying",
+    });
+  });
   test("registers exact status, inspect, and wait schemas without cursors or transcript arguments", async () => {
     const { runtime } = await setupBoundWorker();
     const plugin = await SolOrchestratorPlugin(
@@ -2718,6 +2894,358 @@ describe("Task 9 preemptive worker steering", () => {
 });
 
 describe("Task 10 optional structured-write decisions", () => {
+  test("holds an out-of-scope apply_patch before execution until Sol denies it", async () => {
+    const emptyScopeDefinition: WorkflowDefinition = {
+      ...definition,
+      steps: definition.steps.map((step) => ({
+        ...step,
+        jobs: step.jobs.map((job) => ({ ...job, writeFiles: [] })),
+      })),
+    };
+    const { runtime, sessions, store } = await setupBoundWorker({
+      definitionInput: emptyScopeDefinition,
+      fingerprint: () => Promise.resolve(new Map()),
+    });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const before = plugin["tool.execute.before"];
+    const permission = plugin.tool.agents_permission;
+    if (before === undefined || permission === undefined) {
+      throw new Error(
+        "Structured-write permission controls must be registered."
+      );
+    }
+
+    const execution = before(
+      {
+        callID: "preflight-apply-patch",
+        sessionID: "child-1",
+        tool: "apply_patch",
+      },
+      {
+        args: {
+          patchText: [
+            "*** Begin Patch",
+            "*** Add File: docs/outside.md",
+            "+must not be written",
+            "*** End Patch",
+          ].join("\n"),
+        },
+      }
+    ).then(
+      () => "resolved" as const,
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    );
+
+    expect(
+      await Promise.race([execution, sleep(250).then(() => "pending" as const)])
+    ).toBe("pending");
+    expect((await store.readRoot()).permissions).toMatchObject([
+      {
+        requested_paths: ["docs/outside.md"],
+        task_id: "child-1",
+        tool: "apply_patch",
+      },
+    ]);
+    expect(sessions.permissionReplies).toEqual([]);
+
+    await permission.execute(
+      {
+        decision: "deny",
+        feedback: "Live preflight denial.",
+        job: "implement worker lifecycle",
+      },
+      context("parent-1", "sol")
+    );
+
+    expect(await execution).toContain("Live preflight denial.");
+    expect((await store.readRoot()).permissions).toEqual([]);
+    expect(sessions.permissionReplies).toEqual([]);
+  });
+
+  test("releases one preflight-approved call and answers only its correlated native permission", async () => {
+    const emptyScopeDefinition: WorkflowDefinition = {
+      ...definition,
+      steps: definition.steps.map((step) => ({
+        ...step,
+        jobs: step.jobs.map((job) => ({ ...job, writeFiles: [] })),
+      })),
+    };
+    const { runtime, sessions, store } = await setupBoundWorker({
+      definitionInput: emptyScopeDefinition,
+      fingerprint: () => Promise.resolve(new Map()),
+    });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const before = plugin["tool.execute.before"];
+    const event = plugin.event;
+    const permission = plugin.tool.agents_permission;
+    if (
+      before === undefined ||
+      event === undefined ||
+      permission === undefined
+    ) {
+      throw new Error(
+        "Structured-write permission controls must be registered."
+      );
+    }
+
+    const execution = before(
+      {
+        callID: "preflight-allow-once",
+        sessionID: "child-1",
+        tool: "write",
+      },
+      { args: { content: "allowed once", filePath: "docs/once.md" } }
+    );
+    await sleep(250);
+    expect((await store.readRoot()).permissions).toMatchObject([
+      {
+        requested_paths: ["docs/once.md"],
+        task_id: "child-1",
+        tool: "write",
+      },
+    ]);
+
+    await permission.execute(
+      { decision: "allow_once", job: "implement worker lifecycle" },
+      context("parent-1", "sol")
+    );
+    await execution;
+    expect(sessions.permissionReplies).toEqual([]);
+
+    const native = editPermission(
+      "native-after-preflight",
+      ["docs/once.md"],
+      "preflight-allow-once"
+    );
+    sessions.permissionRequests = [native];
+    await event({
+      event: { properties: native, type: "permission.asked" },
+    });
+
+    expect(sessions.permissionReplies).toEqual([
+      { reply: "once", requestID: "native-after-preflight" },
+    ]);
+    expect((await store.readRoot()).permissions).toEqual([]);
+  });
+
+  test("lets unscoped and in-scope structured writes cross preflight immediately", async () => {
+    for (const item of [
+      {
+        args: { content: "unscoped", filePath: "anywhere.txt" },
+        definitionInput: definition,
+        tool: "write",
+      },
+      {
+        args: {
+          filePath: "/workspace/src/in-scope.ts",
+          newString: "next",
+          oldString: "previous",
+        },
+        definitionInput: scopedDefinition,
+        tool: "edit",
+      },
+    ]) {
+      const { runtime, store } = await setupBoundWorker({
+        definitionInput: item.definitionInput,
+        fingerprint: () => Promise.resolve(new Map()),
+      });
+      const plugin = await SolOrchestratorPlugin(
+        { client: { session: {} }, directory: "/workspace" },
+        { runtime }
+      );
+      const before = plugin["tool.execute.before"];
+      if (before === undefined) {
+        throw new Error("Structured-write preflight hook must be registered.");
+      }
+
+      await before(
+        {
+          callID: `preflight-${item.tool}`,
+          sessionID: "child-1",
+          tool: item.tool,
+        },
+        { args: item.args }
+      );
+
+      expect((await store.readRoot()).permissions).toEqual([]);
+    }
+  });
+
+  test("rejects malformed and concurrent structured preflights before execution", async () => {
+    const emptyScopeDefinition: WorkflowDefinition = {
+      ...definition,
+      steps: definition.steps.map((step) => ({
+        ...step,
+        jobs: step.jobs.map((job) => ({ ...job, writeFiles: [] })),
+      })),
+    };
+    const { runtime, store } = await setupBoundWorker({
+      definitionInput: emptyScopeDefinition,
+      fingerprint: () => Promise.resolve(new Map()),
+    });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const before = plugin["tool.execute.before"];
+    const permission = plugin.tool.agents_permission;
+    if (before === undefined || permission === undefined) {
+      throw new Error(
+        "Structured-write permission controls must be registered."
+      );
+    }
+
+    await expect(
+      before(
+        {
+          callID: "malformed-preflight",
+          sessionID: "child-1",
+          tool: "apply_patch",
+        },
+        { args: { patchText: "*** Begin Patch\n*** End Patch" } }
+      )
+    ).rejects.toThrow("contains no file headers");
+
+    const first = before(
+      {
+        callID: "first-preflight",
+        sessionID: "child-1",
+        tool: "write",
+      },
+      { args: { content: "first", filePath: "docs/first.md" } }
+    );
+    await sleep(250);
+    await expect(
+      before(
+        {
+          callID: "second-preflight",
+          sessionID: "child-1",
+          tool: "write",
+        },
+        { args: { content: "second", filePath: "docs/second.md" } }
+      )
+    ).rejects.toThrow("already has a pending structured-write permission");
+
+    await permission.execute(
+      { decision: "deny", job: "implement worker lifecycle" },
+      context("parent-1", "sol")
+    );
+    await expect(first).rejects.toThrow("denied by Sol");
+    expect((await store.readRoot()).permissions).toEqual([]);
+  });
+
+  test("persists a preflight allow_for_job grant before releasing the call", async () => {
+    const emptyScopeDefinition: WorkflowDefinition = {
+      ...definition,
+      steps: definition.steps.map((step) => ({
+        ...step,
+        jobs: step.jobs.map((job) => ({ ...job, writeFiles: [] })),
+      })),
+    };
+    const { runtime, sessions, store } = await setupBoundWorker({
+      definitionInput: emptyScopeDefinition,
+      fingerprint: () => Promise.resolve(new Map()),
+    });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const before = plugin["tool.execute.before"];
+    const permission = plugin.tool.agents_permission;
+    if (before === undefined || permission === undefined) {
+      throw new Error(
+        "Structured-write permission controls must be registered."
+      );
+    }
+
+    const execution = before(
+      {
+        callID: "preflight-allow-for-job",
+        sessionID: "child-1",
+        tool: "write",
+      },
+      { args: { content: "grant", filePath: "docs/granted.md" } }
+    );
+    await sleep(250);
+    await permission.execute(
+      { decision: "allow_for_job", job: "implement worker lifecycle" },
+      context("parent-1", "sol")
+    );
+    await execution;
+
+    expect((await store.readRoot()).job_runs[0]?.write_grants).toEqual([
+      "docs/granted.md",
+    ]);
+    expect(sessions.appended.at(-1)).toEqual({
+      rules: [
+        {
+          action: "allow",
+          pattern: "docs/granted.md",
+          permission: "edit",
+        },
+      ],
+      sessionID: "child-1",
+    });
+    expect((await store.readRoot()).permissions).toEqual([]);
+  });
+
+  test("interrupt rejects and clears a pending structured preflight", async () => {
+    const emptyScopeDefinition: WorkflowDefinition = {
+      ...definition,
+      steps: definition.steps.map((step) => ({
+        ...step,
+        jobs: step.jobs.map((job) => ({ ...job, writeFiles: [] })),
+      })),
+    };
+    const { runtime, sessions, store } = await setupBoundWorker({
+      definitionInput: emptyScopeDefinition,
+      fingerprint: () => Promise.resolve(new Map()),
+    });
+    const plugin = await SolOrchestratorPlugin(
+      { client: { session: {} }, directory: "/workspace" },
+      { runtime }
+    );
+    const before = plugin["tool.execute.before"];
+    const interrupt = plugin.tool.agents_interrupt;
+    if (before === undefined || interrupt === undefined) {
+      throw new Error(
+        "Structured-write interrupt controls must be registered."
+      );
+    }
+
+    const execution = before(
+      {
+        callID: "preflight-interrupt",
+        sessionID: "child-1",
+        tool: "write",
+      },
+      { args: { content: "blocked", filePath: "docs/blocked.md" } }
+    ).then(
+      () => "resolved",
+      (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    );
+    await sleep(250);
+    await interrupt.execute(
+      {
+        job: "implement worker lifecycle",
+        reason: "Preflight interrupt test.",
+      },
+      context("parent-1", "sol")
+    );
+
+    expect(await execution).toBe("Preflight interrupt test.");
+    expect(sessions.aborts).toEqual(["child-1"]);
+    expect((await store.readRoot()).permissions).toEqual([]);
+  });
+
   test("registers the exact agents_permission schema without native request IDs", async () => {
     const { runtime } = await setupBoundWorker();
     const plugin = await SolOrchestratorPlugin(

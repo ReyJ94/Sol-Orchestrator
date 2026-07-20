@@ -295,6 +295,7 @@ export const JobRunRecordSchema = z
 export const WorkerLiveStateSchema = z.enum([
   "starting",
   "busy",
+  "retrying",
   "idle",
   "preempting",
   "review",

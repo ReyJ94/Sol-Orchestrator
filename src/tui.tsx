@@ -362,7 +362,7 @@ export const createSolOrchestratorTuiPlugin =
       if (summary === null) {
         api.ui.toast({
           duration: 4000,
-          message: `No durable goal or workflow · Start /goal <objective>, or use ${exactCall(workflowStartAvailableAction)}`,
+          message: `No durable goal or workflow · Actionable work creates one through ${exactCall(workflowStartAvailableAction)}; /goal <objective> starts one explicitly`,
           title: "Goal & workflow",
           variant: "info",
         });

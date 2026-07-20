@@ -84,6 +84,49 @@ describe("GoalToolService lifecycle", () => {
     );
   });
 
+  test("promotes an unassociated current workflow into the requested durable goal", async () => {
+    const { readRoot, service, store } = harness();
+    await store.mutateRoot(({ workflow }) => {
+      workflow.start({
+        definition: {
+          objective: "Current actionable work",
+          steps: [
+            {
+              dependsOn: [],
+              jobs: [
+                {
+                  actor: { type: "orchestrator" },
+                  dependsOn: [],
+                  name: "finish",
+                  objective: "Finish the current work",
+                },
+              ],
+              name: "work",
+              objective: "Do the current work",
+            },
+          ],
+        },
+        orchestrator_agent_id: "sol",
+        parent_session_id: "parent-1",
+        workflow_id: "workflow-before-goal",
+      });
+    });
+
+    const status = await service.start(
+      { objective: "Deliver the promoted user outcome" },
+      context
+    );
+    const root = await readRoot();
+
+    expect(status.goal).toEqual({
+      objective: "Deliver the promoted user outcome",
+      status: "active",
+    });
+    expect(root.workflows.workflows[0]?.goal_id).toBe(
+      root.goals.goals[0]?.goal_id
+    );
+  });
+
   test("rejects dishonest completion and preserves block and resume semantics", async () => {
     const { service, store } = harness();
     await service.start({ objective: "One goal" }, context);

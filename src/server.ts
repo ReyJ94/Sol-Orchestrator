@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
@@ -23,6 +24,7 @@ import {
   type OpenCodePermissionRule,
   type OpenCodeSession,
   type OpenCodeSessionStatus,
+  OpenCodeSessionStatusSchema,
 } from "./opencode-session.js";
 import { OrchestrationState } from "./orchestration-state.js";
 import { OrchestrationStore } from "./orchestration-store.js";
@@ -126,6 +128,29 @@ type ServerInput = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const routingStatus = (
+  status: OpenCodeSessionStatus | "missing"
+): "busy" | "idle" | "missing" => {
+  if (status === "missing") {
+    return "missing";
+  }
+  return status.type === "idle" ? "idle" : "busy";
+};
+
+const nativeStatusFromEvent = (
+  event: Record<string, unknown>,
+  properties: Record<string, unknown>
+): OpenCodeSessionStatus | undefined => {
+  if (event.type === "session.idle") {
+    return { type: "idle" };
+  }
+  if (event.type !== "session.status" || !isRecord(properties.status)) {
+    return;
+  }
+  const parsed = OpenCodeSessionStatusSchema.safeParse(properties.status);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const configuredWorkerProfiles = (
   configured: Record<string, unknown>
@@ -462,6 +487,7 @@ export const createDefaultServerRuntime = (input: {
       await workerTurns.cleanupWorkflow(workflowID),
     create_id: createID,
     refresh_workers: async (parentSessionID) => {
+      await reconcile();
       await workerTurns.status({ parent_session_id: parentSessionID });
     },
     store,
@@ -479,15 +505,12 @@ export const createDefaultServerRuntime = (input: {
         persisted.child_session_id,
         input.directory
       );
-      const current = statuses[persisted.child_session_id]?.type;
       return {
         childExists: true,
         finalMessageID: latestCompletedAssistant(messages),
         messages,
         status:
-          current === "busy" || current === "retry"
-            ? ("busy" as const)
-            : ("idle" as const),
+          statuses[persisted.child_session_id] ?? ({ type: "idle" } as const),
       };
     } catch {
       return {
@@ -542,7 +565,7 @@ export const createDefaultServerRuntime = (input: {
       active_tool: hasActiveToolPart(observation.messages),
       delivery: outcome.action === "resume_delivery" ? outcome.delivery : null,
       delivery_user_message_exists: recovery.userMessageExists,
-      status: observation.status,
+      status: routingStatus(observation.status),
       task_id: persisted.task_id,
     };
   };
@@ -727,6 +750,71 @@ const canonicalPermissionPaths = (patterns: readonly string[]): string[] => {
   return paths;
 };
 
+const WORKER_STRUCTURED_WRITE_TOOLS = new Set(["apply_patch", "edit", "write"]);
+
+const structuredWritePaths = (
+  toolName: string,
+  args: unknown,
+  directory: string
+): string[] | undefined => {
+  if (!WORKER_STRUCTURED_WRITE_TOOLS.has(toolName)) {
+    return;
+  }
+  if (!isRecord(args)) {
+    throw new Error("Structured-write arguments must be an object.");
+  }
+  const authoredPaths: string[] = [];
+  if (toolName === "edit" || toolName === "write") {
+    if (
+      typeof args.filePath !== "string" ||
+      args.filePath.trim().length === 0
+    ) {
+      throw new Error("Structured-write filePath is unavailable.");
+    }
+    authoredPaths.push(args.filePath);
+  } else {
+    if (
+      typeof args.patchText !== "string" ||
+      args.patchText.trim().length === 0
+    ) {
+      throw new Error("Structured-write patchText is unavailable.");
+    }
+    for (const line of args.patchText.replaceAll("\r\n", "\n").split("\n")) {
+      const prefix = [
+        "*** Add File:",
+        "*** Delete File:",
+        "*** Update File:",
+        "*** Move to:",
+      ].find((candidate) => line.startsWith(candidate));
+      if (prefix !== undefined) {
+        authoredPaths.push(line.slice(prefix.length).trim());
+      }
+    }
+    if (authoredPaths.length === 0) {
+      throw new Error("Structured-write patch contains no file headers.");
+    }
+  }
+  return canonicalPermissionPaths(
+    authoredPaths.map((candidate) => {
+      const absolute = path.resolve(directory, candidate);
+      return path.relative(directory, absolute).replaceAll("\\", "/");
+    })
+  );
+};
+
+type StructuredWriteBarrier = {
+  readonly callID: string;
+  readonly promise: Promise<void>;
+  readonly reject: (error: Error) => void;
+  readonly requestID: string;
+  readonly resolve: () => void;
+  readonly sessionID: string;
+  readonly taskID: string;
+};
+
+const permissionCallKey = (sessionID: string, callID: string): string =>
+  `${sessionID}\u0000${callID}`;
+
 const managedBackgroundNotification = (input: {
   readonly root: RootSnapshot;
   readonly state: "completed" | "error";
@@ -831,6 +919,8 @@ export const SolOrchestratorPlugin = (
     string,
     OpenCodePermissionRequest
   >();
+  const structuredWriteBarriers = new Map<string, StructuredWriteBarrier>();
+  const preapprovedStructuredCalls = new Set<string>();
   const defer = options.defer ?? runtime.defer;
 
   const enforceSolWorkflowBoundary = (
@@ -1336,19 +1426,23 @@ export const SolOrchestratorPlugin = (
     });
   };
 
-  const routeDelivery = async (inputState: {
+  type DeliveryRouteInput = {
     readonly activeTool: boolean;
     readonly restart: boolean;
     readonly state: string;
     readonly status: "busy" | "idle";
     readonly taskID: string;
     readonly userMessageExists: boolean;
-  }): Promise<void> => {
+  };
+
+  const routeNonPreemptiveDelivery = async (
+    inputState: DeliveryRouteInput
+  ): Promise<boolean> => {
     if (inputState.state === "started") {
       if (inputState.restart && inputState.status === "idle") {
         await blockStalledStartedDelivery(inputState.taskID);
       }
-      return;
+      return true;
     }
     if (inputState.state === "dispatched") {
       if (
@@ -1358,6 +1452,15 @@ export const SolOrchestratorPlugin = (
       ) {
         await resumeDispatchedDelivery(inputState.taskID);
       }
+      return true;
+    }
+    return false;
+  };
+
+  const routeDelivery = async (
+    inputState: DeliveryRouteInput
+  ): Promise<void> => {
+    if (await routeNonPreemptiveDelivery(inputState)) {
       return;
     }
     if (inputState.status === "idle") {
@@ -1461,9 +1564,9 @@ export const SolOrchestratorPlugin = (
     });
   };
 
-  const persistPermissionRequest = async (
+  const persistPermissionRecord = async (
     worker: WorkerBindingRecord,
-    request: OpenCodePermissionRequest,
+    requestID: string,
     paths: string[],
     toolName: string
   ): Promise<void> => {
@@ -1476,7 +1579,7 @@ export const SolOrchestratorPlugin = (
         (permission) => permission.task_id === current.task_id
       );
       if (
-        existing?.request_id === request.id &&
+        existing?.request_id === requestID &&
         existing.tool === toolName &&
         JSON.stringify(existing.requested_paths) === JSON.stringify(paths)
       ) {
@@ -1491,7 +1594,7 @@ export const SolOrchestratorPlugin = (
       root.permissions.push({
         created_at: createdAt,
         permission: "edit",
-        request_id: request.id,
+        request_id: requestID,
         requested_paths: paths,
         task_id: current.task_id,
         tool: toolName,
@@ -1510,12 +1613,73 @@ export const SolOrchestratorPlugin = (
     });
   };
 
+  const persistPermissionRequest = async (
+    worker: WorkerBindingRecord,
+    request: OpenCodePermissionRequest,
+    paths: string[],
+    toolName: string
+  ): Promise<void> => {
+    await persistPermissionRecord(worker, request.id, paths, toolName);
+  };
+
   const clearPersistedPermission = async (taskID: string): Promise<void> => {
     await store.mutateRoot(({ root }) => {
       root.permissions = root.permissions.filter(
         (permission) => permission.task_id !== taskID
       );
     });
+  };
+
+  const reconcileCompletedWorkerBeforeInterrupt = async (
+    worker: WorkerBindingRecord
+  ): Promise<boolean> => {
+    const messages = await sessions.messages(
+      worker.child_session_id,
+      input.directory
+    );
+    const boundary = messages.findLast(
+      (message) => message.info.role === "user"
+    );
+    if (boundary === undefined) {
+      return false;
+    }
+    const final = messages.findLast(
+      (message) =>
+        messageParentID(message) === boundary.info.id &&
+        terminalAssistantMessageID(message) !== null
+    );
+    if (final === undefined) {
+      return false;
+    }
+    const accepted = await store.mutateRoot((state) => {
+      const current = workerForSession(state.root, worker.task_id);
+      if (current === undefined) {
+        return false;
+      }
+      if (
+        current.live_state === "review" &&
+        current.latest_event?.kind === "result"
+      ) {
+        return true;
+      }
+      if (
+        current.live_state === "blocked" ||
+        current.live_state === "interrupted" ||
+        orchestration.delivery(state.root, current.task_id) !== null
+      ) {
+        return false;
+      }
+      orchestration.final(state, {
+        message_id: final.info.id,
+        parent_session_id: current.parent_session_id,
+        task_id: current.task_id,
+      });
+      return true;
+    });
+    if (accepted) {
+      await workerTurns.refresh(worker.task_id);
+    }
+    return accepted;
   };
 
   const permissionPathsOrBlock = async (
@@ -1551,6 +1715,62 @@ export const SolOrchestratorPlugin = (
           )
       )
     );
+  };
+
+  const holdOutOfScopeStructuredWrite = async (
+    root: RootSnapshot,
+    worker: WorkerBindingRecord,
+    hookInput: { readonly callID: string; readonly tool: string },
+    args: unknown
+  ): Promise<void> => {
+    const paths = structuredWritePaths(hookInput.tool, args, input.directory);
+    if (paths === undefined || permissionIsInScope(root, worker, paths)) {
+      return;
+    }
+    if (
+      structuredWriteBarriers.has(worker.task_id) ||
+      root.permissions.some(
+        (permission) => permission.task_id === worker.task_id
+      )
+    ) {
+      throw new Error(
+        `Managed worker job ${JSON.stringify(worker.job)} already has a pending structured-write permission.`
+      );
+    }
+    const deferred = Promise.withResolvers<void>();
+    const barrier: StructuredWriteBarrier = {
+      callID: hookInput.callID,
+      promise: deferred.promise,
+      reject: deferred.reject,
+      requestID: runtime.createID(),
+      resolve: deferred.resolve,
+      sessionID: worker.child_session_id,
+      taskID: worker.task_id,
+    };
+    structuredWriteBarriers.set(worker.task_id, barrier);
+    try {
+      await persistPermissionRecord(
+        worker,
+        barrier.requestID,
+        paths,
+        hookInput.tool
+      );
+      await barrier.promise;
+    } finally {
+      if (structuredWriteBarriers.get(worker.task_id) === barrier) {
+        structuredWriteBarriers.delete(worker.task_id);
+      }
+    }
+  };
+
+  const rejectStructuredWriteBarrier = (
+    taskID: string,
+    message: string
+  ): void => {
+    const barrier = structuredWriteBarriers.get(taskID);
+    if (barrier !== undefined) {
+      barrier.reject(new Error(message));
+    }
   };
 
   const surfacePermissionRequest = async (
@@ -1687,6 +1907,167 @@ export const SolOrchestratorPlugin = (
     await configuredRecovery;
   };
 
+  type PermissionDecisionArgs = {
+    readonly decision: "allow_for_job" | "allow_once" | "deny";
+    readonly feedback?: string;
+    readonly job: string;
+  };
+
+  const preparePermissionDecision = async (
+    args: PermissionDecisionArgs,
+    context: ToolContext
+  ) => {
+    const snapshot = await store.readRoot();
+    const worker = currentWorkerForJob(
+      snapshot,
+      context.sessionID,
+      context.agent,
+      args.job
+    );
+    const pending = snapshot.permissions.find(
+      (permission) => permission.task_id === worker.task_id
+    );
+    if (pending === undefined) {
+      throw new Error(
+        `Job ${JSON.stringify(worker.job)} has no pending structured-write permission. Call agents_status({ job: ${JSON.stringify(worker.job)} }).`
+      );
+    }
+    const barrier = structuredWriteBarriers.get(worker.task_id);
+    const selected = await store.mutateRoot(({ root }) => {
+      const current = workerForSession(root, worker.task_id);
+      const currentPermission = root.permissions.find(
+        (permission) => permission.task_id === worker.task_id
+      );
+      if (
+        current === undefined ||
+        current.parent_session_id !== context.sessionID ||
+        currentPermission?.request_id !== pending.request_id
+      ) {
+        throw new Error(
+          "Managed worker permission changed before the decision was applied."
+        );
+      }
+      if (args.decision === "allow_for_job") {
+        const { run } = workerWriteContract(root, current);
+        run.write_grants = [
+          ...new Set([
+            ...run.write_grants,
+            ...currentPermission.requested_paths,
+          ]),
+        ].sort();
+        run.updated_at = runtime.now();
+      }
+      root.permissions = root.permissions.filter(
+        (permission) => permission.task_id !== current.task_id
+      );
+      return {
+        paths: currentPermission.requested_paths,
+        sessionID: current.child_session_id,
+      };
+    });
+    return {
+      barrier,
+      pending,
+      preflight: barrier?.requestID === pending.request_id,
+      selected,
+      worker,
+    };
+  };
+
+  const deliverPermissionDecision = async (
+    prepared: Awaited<ReturnType<typeof preparePermissionDecision>>,
+    args: PermissionDecisionArgs,
+    context: ToolContext
+  ): Promise<void> => {
+    const { barrier, pending, preflight, selected } = prepared;
+    if (args.decision === "allow_for_job") {
+      await sessions.appendPermissions(
+        selected.sessionID,
+        selected.paths.map((pattern) => ({
+          action: "allow" as const,
+          pattern,
+          permission: "edit",
+        })),
+        context.directory
+      );
+    }
+    if (preflight && barrier !== undefined) {
+      if (args.decision === "deny") {
+        barrier.reject(
+          new Error(args.feedback ?? "Structured write denied by Sol.")
+        );
+        return;
+      }
+      preapprovedStructuredCalls.add(
+        permissionCallKey(barrier.sessionID, barrier.callID)
+      );
+      barrier.resolve();
+      return;
+    }
+    await sessions.replyPermission({
+      ...(args.decision === "deny" && args.feedback !== undefined
+        ? { feedback: args.feedback }
+        : {}),
+      reply: args.decision === "deny" ? "reject" : "once",
+      requestID: pending.request_id,
+    });
+  };
+
+  const handlePermissionAsked = async (
+    event: Record<string, unknown>
+  ): Promise<void> => {
+    const properties = isRecord(event.properties) ? event.properties : {};
+    const request = OpenCodePermissionRequestSchema.parse(properties);
+    if (request.permission !== "edit") {
+      return;
+    }
+    if (request.tool !== undefined) {
+      const key = permissionCallKey(request.sessionID, request.tool.callID);
+      if (preapprovedStructuredCalls.delete(key)) {
+        try {
+          await sessions.replyPermission({
+            reply: "once",
+            requestID: request.id,
+          });
+        } catch {
+          // OpenCode's TUI auto-permission mode may win the same `once`
+          // reply race. Either reply releases only this correlated call.
+        }
+        return;
+      }
+    }
+    pendingPermissionRequests.set(request.id, request);
+    await reconcilePermissionRequests();
+    await wakeGoalParentForWorker(request.sessionID);
+  };
+
+  const handlePermissionReplied = async (
+    event: Record<string, unknown>
+  ): Promise<void> => {
+    const properties = isRecord(event.properties) ? event.properties : {};
+    if (
+      typeof properties.sessionID !== "string" ||
+      typeof properties.requestID !== "string"
+    ) {
+      return;
+    }
+    const sessionID = properties.sessionID;
+    const requestID = properties.requestID;
+    pendingPermissionRequests.delete(requestID);
+    await store.mutateRoot(({ root }) => {
+      const worker = workerForSession(root, sessionID);
+      if (worker !== undefined) {
+        root.permissions = root.permissions.filter(
+          (permission) =>
+            !(
+              permission.task_id === worker.task_id &&
+              permission.request_id === requestID
+            )
+        );
+      }
+    });
+  };
+
   const tools: Record<string, ToolDefinition> = {
     ...workflowDefinitions,
     agents_inspect: tool({
@@ -1717,21 +2098,52 @@ export const SolOrchestratorPlugin = (
       description:
         "Permanently stop one managed worker owned by this parent session and block its workflow job.",
       async execute(args, context) {
-        const childSessionID = await store.mutateRoot((state) => {
+        const selected = currentWorkerForJob(
+          await store.readRoot(),
+          context.sessionID,
+          context.agent,
+          args.job
+        );
+        if (await reconcileCompletedWorkerBeforeInterrupt(selected)) {
+          return result({
+            completed: true,
+            interrupted: false,
+            job: args.job,
+          });
+        }
+        const interrupted = await store.mutateRoot((state) => {
           const worker = currentWorkerForJob(
             state.root,
             context.sessionID,
             context.agent,
             args.job
           );
-          orchestration.interrupt(state, {
+          const outcome = orchestration.interrupt(state, {
             parent_session_id: context.sessionID,
             reason: args.reason ?? "Interrupted by Sol.",
             task_id: worker.task_id,
           });
-          return worker.child_session_id;
+          state.root.permissions = state.root.permissions.filter(
+            (permission) => permission.task_id !== worker.task_id
+          );
+          return {
+            childSessionID: worker.child_session_id,
+            outcome,
+            taskID: worker.task_id,
+          };
         });
-        await sessions.abort(childSessionID, context.directory);
+        if (!interrupted.outcome.interrupted) {
+          return result({
+            completed: true,
+            interrupted: false,
+            job: args.job,
+          });
+        }
+        rejectStructuredWriteBarrier(
+          interrupted.taskID,
+          args.reason ?? "Interrupted by Sol."
+        );
+        await sessions.abort(interrupted.childSessionID, context.directory);
         return result({ interrupted: true, job: args.job });
       },
     }),
@@ -1745,84 +2157,28 @@ export const SolOrchestratorPlugin = (
             "agents_permission feedback is valid only with deny."
           );
         }
-        const snapshot = await store.readRoot();
-        const worker = currentWorkerForJob(
-          snapshot,
-          context.sessionID,
-          context.agent,
-          args.job
-        );
-        const pending = snapshot.permissions.find(
-          (permission) => permission.task_id === worker.task_id
-        );
-        if (pending === undefined) {
-          throw new Error(
-            `Job ${JSON.stringify(worker.job)} has no pending structured-write permission. Call agents_status({ job: ${JSON.stringify(worker.job)} }).`
-          );
-        }
-        const selected = await store.mutateRoot(({ root }) => {
-          const current = workerForSession(root, worker.task_id);
-          const currentPermission = root.permissions.find(
-            (permission) => permission.task_id === worker.task_id
-          );
-          if (
-            current === undefined ||
-            current.parent_session_id !== context.sessionID ||
-            currentPermission?.request_id !== pending.request_id
-          ) {
-            throw new Error(
-              "Managed worker permission changed before the decision was applied."
-            );
-          }
-          if (args.decision === "allow_for_job") {
-            const { run } = workerWriteContract(root, current);
-            run.write_grants = [
-              ...new Set([
-                ...run.write_grants,
-                ...currentPermission.requested_paths,
-              ]),
-            ].sort();
-            run.updated_at = runtime.now();
-          }
-          root.permissions = root.permissions.filter(
-            (permission) => permission.task_id !== current.task_id
-          );
-          return {
-            paths: currentPermission.requested_paths,
-            sessionID: current.child_session_id,
-          };
-        });
+        const prepared = await preparePermissionDecision(args, context);
         try {
-          if (args.decision === "allow_for_job") {
-            await sessions.appendPermissions(
-              selected.sessionID,
-              selected.paths.map((pattern) => ({
-                action: "allow" as const,
-                pattern,
-                permission: "edit",
-              })),
-              context.directory
+          await deliverPermissionDecision(prepared, args, context);
+        } catch (error) {
+          if (prepared.preflight && prepared.barrier !== undefined) {
+            prepared.barrier.reject(
+              error instanceof Error
+                ? error
+                : new Error("Structured-write permission decision failed.")
             );
           }
-          await sessions.replyPermission({
-            ...(args.decision === "deny" && args.feedback !== undefined
-              ? { feedback: args.feedback }
-              : {}),
-            reply: args.decision === "deny" ? "reject" : "once",
-            requestID: pending.request_id,
-          });
-        } catch (error) {
           await blockPermissionWorker(
-            worker.task_id,
-            `Managed worker permission decision could not be applied to OpenCode; call agents_interrupt({ job: ${JSON.stringify(worker.job)} }).`
+            prepared.worker.task_id,
+            `Managed worker permission decision could not be applied to OpenCode; call agents_interrupt({ job: ${JSON.stringify(prepared.worker.job)} }).`
           );
           throw error;
         }
-        pendingPermissionRequests.delete(pending.request_id);
+        pendingPermissionRequests.delete(prepared.pending.request_id);
         return result({
           accepted: true,
           decision: args.decision,
-          job: worker.job,
+          job: prepared.worker.job,
         });
       },
     }),
@@ -1937,6 +2293,7 @@ export const SolOrchestratorPlugin = (
       description:
         "List managed workers or show one worker using metadata and content availability only.",
       async execute(args, context) {
+        await runtime.reconcile();
         const root = await store.readRoot();
         if (args.job !== undefined) {
           const worker = currentWorkerForJob(
@@ -2247,40 +2604,33 @@ export const SolOrchestratorPlugin = (
       return;
     }
     const sessionID = properties.sessionID;
-    let liveState: "busy" | "idle" | undefined;
-    if (event.type === "session.idle") {
-      liveState = "idle";
-    } else if (
-      event.type === "session.status" &&
-      isRecord(properties.status) &&
-      (properties.status.type === "busy" ||
-        properties.status.type === "retry" ||
-        properties.status.type === "idle")
-    ) {
-      liveState = properties.status.type === "idle" ? "idle" : "busy";
-    }
-    if (liveState === undefined) {
+    const nativeStatus = nativeStatusFromEvent(event, properties);
+    if (nativeStatus === undefined) {
       return;
     }
-    const deliveryState = await store.mutateRoot(({ root }) => {
+    const observed = await store.mutateRoot(({ root }) => {
       const worker = workerForSession(root, sessionID);
       if (worker !== undefined) {
         orchestration.setLiveState(root, {
-          state: liveState,
+          status: nativeStatus,
           task_id: worker.task_id,
         });
-        return orchestration.delivery(root, worker.task_id)?.state ?? null;
+        return {
+          delivery: orchestration.delivery(root, worker.task_id)?.state ?? null,
+        };
       }
-      return null;
+      return { delivery: null };
     });
     if (
-      liveState === "idle" &&
-      deliveryState !== null &&
-      ["pending_preemption", "waiting_tool_boundary"].includes(deliveryState)
+      nativeStatus.type === "idle" &&
+      observed.delivery !== null &&
+      ["pending_preemption", "waiting_tool_boundary"].includes(
+        observed.delivery
+      )
     ) {
       await claimAndSubmitDelivery(sessionID);
     }
-    if (liveState === "idle") {
+    if (nativeStatus.type === "idle") {
       await continueActiveGoal(sessionID, {
         authoritativeBoundary: "idle",
       });
@@ -2491,22 +2841,50 @@ export const SolOrchestratorPlugin = (
     objectiveInput: string
   ): Promise<void> => {
     const objective = objectiveInput.trim();
-    if (objective.length === 0) {
-      throw new Error("Usage: /goal <objective>");
-    }
     await store.mutateRoot(({ goal, workflow }) => {
-      if (workflow.currentFor(sessionID, "sol") !== undefined) {
-        throw new Error(
-          "Finish the current workflow before starting a durable goal."
-        );
-      }
-      goal.start({
+      const currentWorkflow = workflow.currentFor(sessionID, "sol");
+      const created = goal.start({
         goal_id: runtime.createID(),
         objective,
         orchestrator_agent_id: "sol",
         parent_session_id: sessionID,
       });
+      if (currentWorkflow !== undefined) {
+        workflow.attachGoal({
+          goal_id: created.goal_id,
+          workflow_id: currentWorkflow.workflow_id,
+        });
+      }
     });
+  };
+
+  const goalStatusPrompt = async (sessionID: string): Promise<string> => {
+    const status = projectWorkflowStatus(
+      await store.readRoot(),
+      { agent: "sol", parent_session_id: sessionID },
+      runtime.availableWorkerProfiles()
+    );
+    if (status.goal === null) {
+      return [
+        "The user requested durable goal and workflow status.",
+        "No durable goal is active for this session.",
+        "Report that directly. Do not create a goal unless the user also requested actionable work.",
+      ].join(" ");
+    }
+    return [
+      "The user requested durable goal and workflow status.",
+      "Report the following bounded status directly without recreating or changing it:",
+      JSON.stringify({
+        goal: status.goal,
+        workflow:
+          status.current === null
+            ? null
+            : {
+                objective: status.current.objective,
+                state: status.current.state,
+              },
+      }),
+    ].join(" ");
   };
 
   return {
@@ -2517,7 +2895,8 @@ export const SolOrchestratorPlugin = (
       config.command = configuredCommands;
       configuredCommands.goal ??= {
         agent: "sol",
-        description: "Start a durable goal that stays active across workflows",
+        description:
+          "Show the current durable goal, or start one from arguments",
         template: "$ARGUMENTS",
       };
       configuredCommands["goal-stop"] ??= {
@@ -2547,6 +2926,13 @@ export const SolOrchestratorPlugin = (
       await awaitRuntimeRecovery();
       if (hookInput.command !== "goal-stop") {
         if (hookInput.command !== "goal") {
+          return;
+        }
+        if (hookInput.arguments.trim().length === 0) {
+          output.parts.splice(0, output.parts.length, {
+            text: await goalStatusPrompt(hookInput.sessionID),
+            type: "text",
+          });
           return;
         }
         await startGoalFromUserCommand(
@@ -2579,8 +2965,16 @@ export const SolOrchestratorPlugin = (
       await awaitRuntimeRecovery();
       const root = await store.readRoot();
       enforceSolWorkflowBoundary(root, hookInput);
-      await workerTurns.beforeTool({ ...hookInput, args: output.args });
       const worker = workerForSession(root, hookInput.sessionID);
+      if (worker !== undefined) {
+        await holdOutOfScopeStructuredWrite(
+          root,
+          worker,
+          hookInput,
+          output.args
+        );
+      }
+      await workerTurns.beforeTool({ ...hookInput, args: output.args });
       if (worker !== undefined) {
         const calls = activeToolCalls.get(worker.child_session_id) ?? new Set();
         calls.add(hookInput.callID);
@@ -2621,38 +3015,11 @@ export const SolOrchestratorPlugin = (
         return;
       }
       if (event.type === "permission.asked") {
-        const properties = isRecord(event.properties) ? event.properties : {};
-        const request = OpenCodePermissionRequestSchema.parse(properties);
-        if (request.permission !== "edit") {
-          return;
-        }
-        pendingPermissionRequests.set(request.id, request);
-        await reconcilePermissionRequests();
-        await wakeGoalParentForWorker(request.sessionID);
+        await handlePermissionAsked(event);
         return;
       }
       if (event.type === "permission.replied") {
-        const properties = isRecord(event.properties) ? event.properties : {};
-        if (
-          typeof properties.sessionID === "string" &&
-          typeof properties.requestID === "string"
-        ) {
-          const sessionID = properties.sessionID;
-          const requestID = properties.requestID;
-          pendingPermissionRequests.delete(requestID);
-          await store.mutateRoot(({ root }) => {
-            const worker = workerForSession(root, sessionID);
-            if (worker !== undefined) {
-              root.permissions = root.permissions.filter(
-                (permission) =>
-                  !(
-                    permission.task_id === worker.task_id &&
-                    permission.request_id === requestID
-                  )
-              );
-            }
-          });
-        }
+        await handlePermissionReplied(event);
         return;
       }
       await handleSessionState(event);

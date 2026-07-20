@@ -40,7 +40,7 @@ const definition = (): WorkflowDefinition =>
             objective: "Frame the invariant",
           },
           {
-            actor: { profile: "luna-max", type: "worker" },
+            actor: { profile: "terra-max", type: "worker" },
             mode: "research",
             name: "research",
             objective: "Research the owner",
@@ -325,6 +325,22 @@ describe("WorkflowState replacement", () => {
     expect(stateFor(state, "integrate")?.state).toBe("completed");
     expect(stateFor(state, "finish")?.state).toBe("active");
     expect(state.snapshot().workflows[0]?.versions).toHaveLength(2);
+  });
+
+  test("replaces the workflow objective when the user outcome changes", () => {
+    const state = new WorkflowState({ now: () => timestamp });
+    start(state);
+
+    state.replace({
+      objective: "Deliver the revised user outcome",
+      reason: "The user changed the requested outcome.",
+      steps: definition().steps,
+      workflow_id: "workflow-1",
+    });
+
+    expect(
+      state.currentFor("parent-1", "sol")?.versions.at(-1)?.definition.objective
+    ).toBe("Deliver the revised user outcome");
   });
 
   test("resets a changed job and every completion whose prerequisite closure changed", () => {

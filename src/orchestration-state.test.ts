@@ -234,6 +234,25 @@ describe("OrchestrationState", () => {
     ).toEqual({ action: "busy", task_id: taskID });
     expect(busy.root.workers[0]?.live_state).toBe("busy");
 
+    const retrying = activeFixture();
+    expect(
+      state.reconcile(retrying, {
+        child_exists: true,
+        final_message_id: null,
+        status: {
+          attempt: 2,
+          message: "Provider request failed and will be retried.",
+          next: Date.parse("2026-07-17T12:00:05.000Z"),
+          type: "retry",
+        },
+        task_id: taskID,
+      })
+    ).toEqual({ action: "retrying", task_id: taskID });
+    expect(retrying.root.workers[0]).toMatchObject({
+      latest_event: null,
+      live_state: "retrying",
+    });
+
     const completed = activeFixture();
     expect(
       state.reconcile(completed, {

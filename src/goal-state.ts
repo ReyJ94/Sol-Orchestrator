@@ -88,6 +88,25 @@ export class GoalState {
     return goal === undefined ? undefined : clone(goal);
   }
 
+  updateObjective(input: {
+    readonly goal_id: string;
+    readonly objective: string;
+  }): GoalRecord {
+    const goal = this.#record(input.goal_id);
+    if (goal.status !== "active" && goal.status !== "blocked") {
+      throw new Error(
+        `Goal ${goal.goal_id} cannot change objective from ${goal.status}.`
+      );
+    }
+    const objective = input.objective.trim();
+    if (objective.length === 0 || objective.length > 8000) {
+      throw new Error("Goal objective must contain 1..8000 characters.");
+    }
+    goal.objective = objective;
+    goal.updated_at = this.#now();
+    return clone(goal);
+  }
+
   complete(input: {
     readonly current_workflow?: WorkflowRecord;
     readonly goal_id: string;

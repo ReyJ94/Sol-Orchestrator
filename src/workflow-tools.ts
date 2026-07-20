@@ -43,6 +43,7 @@ const WorkflowCompleteInputSchema = z
 
 const WorkflowReplaceInputSchema = z
   .object({
+    objective: z.string().trim().min(1).max(4000).optional(),
     reason: MessageSchema,
     steps: z.array(WorkflowStepSchema).min(1),
   })
@@ -187,13 +188,17 @@ export class WorkflowToolService {
     const definition = normalizeWorkflowDefinition(parsed);
     this.#assertAvailableProfiles(definition);
     await this.#store.mutateRoot(({ goal, workflow }) => {
-      const currentGoal = goal.currentFor(
-        parsedContext.parent_session_id,
-        parsedContext.agent
-      );
+      const currentGoal =
+        goal.currentFor(parsedContext.parent_session_id, parsedContext.agent) ??
+        goal.start({
+          goal_id: this.#createID(),
+          objective: definition.objective,
+          orchestrator_agent_id: parsedContext.agent,
+          parent_session_id: parsedContext.parent_session_id,
+        });
       workflow.start({
         definition,
-        ...(currentGoal === undefined ? {} : { goal_id: currentGoal.goal_id }),
+        goal_id: currentGoal.goal_id,
         orchestrator_agent_id: parsedContext.agent,
         parent_session_id: parsedContext.parent_session_id,
         workflow_id: this.#createID(),
@@ -264,18 +269,28 @@ export class WorkflowToolService {
   async replace(input: unknown, context: unknown) {
     const parsedContext = this.#context(context);
     const parsed = WorkflowReplaceInputSchema.parse(input);
-    await this.#store.mutateWorkflow((state) => {
-      const current = this.#current(state, parsedContext);
+    await this.#store.mutateRoot(({ goal, workflow }) => {
+      const current = this.#current(workflow, parsedContext);
       const definition: WorkflowDefinition = WorkflowDefinitionSchema.parse({
-        objective: currentVersion(current).definition.objective,
+        objective:
+          parsed.objective ?? currentVersion(current).definition.objective,
         steps: parsed.steps,
       });
       this.#assertAvailableProfiles(definition);
-      state.replace({
+      workflow.replace({
+        ...(parsed.objective === undefined
+          ? {}
+          : { objective: parsed.objective }),
         reason: parsed.reason,
         steps: definition.steps,
         workflow_id: current.workflow_id,
       });
+      if (parsed.objective !== undefined && current.goal_id !== undefined) {
+        goal.updateObjective({
+          goal_id: current.goal_id,
+          objective: parsed.objective,
+        });
+      }
     });
     return await this.status({}, parsedContext);
   }

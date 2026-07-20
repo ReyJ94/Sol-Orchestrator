@@ -124,6 +124,47 @@ describe("OpenCodeSessionAdapter", () => {
     await expect(adapter.remove("child-1")).resolves.toBeUndefined();
   });
 
+  test("preserves bounded native retry details including optional recovery action", async () => {
+    const adapter = new OpenCodeSessionAdapter(
+      transport({
+        status: async () =>
+          success({
+            "child-1": {
+              action: {
+                label: "open settings",
+                link: "https://opencode.ai/settings",
+                message: "Enable available balance.",
+                provider: "openai",
+                reason: "account_rate_limit",
+                title: "Usage limit reached",
+              },
+              attempt: 3,
+              message:
+                "Provider request failed and will be retried. Please include the request ID 4488a6e8-f303-4abe-affa-90b4be286941 in your message.",
+              next: 1_784_481_739_000,
+              type: "retry",
+            },
+          }),
+      }),
+      "/workspace"
+    );
+
+    expect((await adapter.status())["child-1"]).toEqual({
+      action: {
+        label: "open settings",
+        link: "https://opencode.ai/settings",
+        message: "Enable available balance.",
+        provider: "openai",
+        reason: "account_rate_limit",
+        title: "Usage limit reached",
+      },
+      attempt: 3,
+      message: "Provider request failed and will be retried.",
+      next: 1_784_481_739_000,
+      type: "retry",
+    });
+  });
+
   test("builds exact native child creation and cleanup requests", async () => {
     const requests: unknown[] = [];
     const adapter = new OpenCodeSessionAdapter(

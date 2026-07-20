@@ -59,9 +59,10 @@ export const projectLatestEvent = (
   if (event === null) {
     return null;
   }
-  return event.kind === "result"
-    ? { kind: "result" }
-    : { kind: event.kind, message: event.message };
+  if (event.kind === "result") {
+    return { kind: "result" };
+  }
+  return { kind: event.kind, message: event.message };
 };
 
 export const projectTurn = (turn: WorkerTurnRecord) => ({
@@ -229,7 +230,7 @@ const lifecycleActions = (
 
 const waitAvailable = (job: ProjectedJob): boolean =>
   job.pending_write_permission === undefined &&
-  ["busy", "preempting", "starting"].includes(job.live_state ?? "");
+  ["busy", "preempting", "retrying", "starting"].includes(job.live_state ?? "");
 
 const inspectionActions = (
   job: ProjectedJob,
