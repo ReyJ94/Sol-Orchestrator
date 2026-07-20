@@ -1,6 +1,6 @@
 {
   "name": "opencode-sol-orchestrator",
-  "version": "0.2.0-beta",
+  "version": "0.3.0",
   "description": "Graph-native multi-agent orchestration for OpenCode with durable goals, workflow DAGs, active supervision, and profile-based delegation.",
   "repository": {
     "type": "git",
