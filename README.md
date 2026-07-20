@@ -6,15 +6,15 @@
 
 **A graph-native multi-agent harness for OpenCode.**
 
-Sol Orchestrator helps one capable agent lead a team without losing sight of
-the user's actual goal. Sol decides the plan, delegates focused work to less
-expensive profiles, reviews their evidence, adapts when reality changes, and
-stays responsible until the whole outcome is complete.
+Sol Orchestrator gives one capable agent durable ownership of the user's actual
+goal. Sol designs the work, executes jobs itself or delegates selected jobs to
+other profiles, reviews the evidence, adapts when reality changes, and stays
+responsible until the whole outcome is complete.
 
-It is designed to make agentic work both smarter and cheaper. The strongest
-model keeps architecture, judgment, and the important context. Workers handle
-bounded investigation, implementation, and verification without filling Sol's
-conversation with their full transcripts.
+The strongest model keeps architecture, judgment, and the important context.
+Bounded investigation, implementation, and verification can be routed to less
+expensive profiles without filling Sol's conversation with their full
+transcripts.
 
 ## Highlights
 
@@ -22,8 +22,9 @@ conversation with their full transcripts.
   of the work and across revisions of the plan.
 - **A real execution graph.** Steps and jobs describe dependencies, ownership,
   parallel work, review, and what can happen next.
-- **Focused delegation.** Each worker receives one bounded job. Sol retains
-  planning, integration, tradeoffs, and final judgment.
+- **Optional, focused delegation.** A workflow may be entirely Sol-owned or
+  assign selected bounded jobs to workers. Sol retains planning, integration,
+  tradeoffs, and final judgment.
 - **Active supervision.** Sol can inspect emerging work, steer a worker early,
   review completed evidence, or deliberately wait for a meaningful event.
 - **Protected context.** Worker details stay out of Sol's conversation until
@@ -60,9 +61,23 @@ Goal: ship the complete feature
     └── ...
 ```
 
-A **goal** is the outcome the user cares about. A **workflow** is one chapter
-in reaching it. Each workflow has a versioned graph. Steps express the larger
-order, while jobs assign the concrete work to Sol or a worker.
+A **goal** is the outcome the user cares about. It may require several bounded
+workflows, each one coherent execution episode. Each workflow has a versioned
+graph: **steps** are ordered semantic stages or decision gates, and **jobs** are
+concrete substeps within a step. Every job has exactly one actor—Sol or one
+worker profile. Dependencies express causal order; genuinely independent jobs
+stay parallel.
+
+Skills can shape the agents' working worldview rather than leaving every graph
+to a generic phase template. They can define what evidence matters, where
+decisions belong, how implementation should be ordered, and what counts as
+acceptance. Sol translates that discipline into stages, jobs, dependencies, and
+actor choices without copying the skill's full methodology into the harness.
+
+The included Sol prompt names `development-loop` as the author's example and
+combines it with relevant domain skills before decomposing development work.
+That skill is not bundled with this plugin. Remove the reference or point it to
+your own comparable skill to personalize the orchestration discipline.
 
 Jobs inside a step can form their own semantic DAG:
 
@@ -71,6 +86,25 @@ inspect runtime ─┐
                  ├──> Sol reassesses ──> implement ──> verify
 map callers ─────┘
 ```
+
+For example, a small discovery graph can keep evidence gathering parallel while
+making the decision gate explicit:
+
+```text
+Step: discover boundary
+  worker: inspect runtime ─┐
+                           ├──> Sol: synthesize evidence
+  worker: map callers ─────┘          │
+                                      └──> next workflow: implement decided design
+```
+
+Workers perform bounded research, implementation, command execution, or
+independent verification. Sol owns synthesis, architecture decisions,
+integration, acceptance, owner-level verification, and deciding the next
+workflow. A Sol job is a binding executable obligation with exact inputs, a
+decision or output, and a stopping condition—not a vague reminder. When
+discovery can change downstream topology, finish with Sol synthesis and author
+the next workflow from evidence rather than speculating it.
 
 This lets independent work happen together without losing the reason it was
 assigned. The graph remembers what depends on what, who owns each obligation,
@@ -90,16 +124,18 @@ opencode --agent sol
 ```
 
 ```text
-/goal Replace the parser without changing emitted records. Establish the
-current behavior, implement the smallest safe change, and verify the real
-boundary.
+Replace the parser without changing emitted records. Establish the current
+behavior, implement the smallest safe change, and verify the real boundary.
 ```
 
-Sol first understands enough of the task to design a useful workflow. It can
-then work on its own jobs while the harness launches ready workers, supervise
-work in progress, and change the graph when evidence demands it. The harness
-keeps dependencies and available actions explicit, so Sol does not have to
-invent IDs, reconstruct protocol state, or guess which operation is legal next.
+Sol first understands enough of the task to design a useful workflow. Starting
+that workflow automatically creates the durable goal when one does not already
+exist. Informational conversation remains goal-free because it does not need a
+workflow. Sol can then work on its own jobs while the harness launches ready
+workers, supervise work in progress, and change the graph when evidence demands
+it. The harness keeps dependencies and available actions explicit, so Sol does
+not have to invent IDs, reconstruct protocol state, or guess which operation is
+legal next.
 
 Waiting is a deliberate part of supervision. If the next decision truly
 depends on a worker, Sol can wait for a meaningful event without abandoning
@@ -117,7 +153,6 @@ reverting repository or Git changes.
 | --- | --- |
 | **Sol** | Owning the goal, designing workflows, steering workers, integrating evidence, and making the final call. |
 | **Luna Medium** | Clear, narrow work with an obvious method and an easily checked result. |
-| **Luna Max** | Careful investigation, adversarial checking, and precise verification. |
 | **Terra Medium** | Cross-file work in one known subsystem that needs stronger interpretation. |
 | **Terra Max** | Difficult bounded work with real ambiguity or meaningful regression risk. |
 
@@ -170,15 +205,16 @@ updating the plugin.
 <details>
 <summary><strong>Command reference</strong></summary>
 
-Most users only need to start Sol and create a goal. The remaining actions are
-the semantic controls Sol uses while running the workflow.
+Most users only need to start Sol and describe the outcome. The remaining
+actions are the semantic controls Sol uses while running the workflow.
 
 ### Start and stop
 
 | Command | Purpose |
 | --- | --- |
 | `opencode --agent sol` | Start OpenCode with Sol as the orchestrator. |
-| `/goal <objective>` | Create a durable goal and let Sol design its first workflow. |
+| `/goal` | Show the current durable goal and workflow status. |
+| `/goal <objective>` | Explicitly create a goal before its first workflow, or promote an unassociated current workflow. |
 | `/goal-stop` | Stop the goal and its workers without reverting repository changes. |
 
 ### Goal and workflow actions
@@ -189,10 +225,10 @@ the semantic controls Sol uses while running the workflow.
 | `goal_block` | Pause liveness at a genuine user or external boundary. |
 | `goal_resume` | Continue after the blocker is resolved. |
 | `workflow_status` | Read the current graph and the actions possible now. |
-| `workflow_start` | Start a complete semantic workflow; ready workers launch automatically from the graph. |
+| `workflow_start` | Start a complete semantic workflow, create its durable goal when absent, and launch ready workers automatically. |
 | `workflow_complete` | Complete Sol's job or accept a reviewed worker result. |
 | `workflow_retry` | Reopen one reviewed or blocked job without redesigning it. |
-| `workflow_replace` | Replace unfinished work with a new graph version. |
+| `workflow_replace` | Replace unfinished work with a new graph version and, when scope changed, update the workflow and goal objective together. |
 
 ### Worker actions
 
@@ -202,7 +238,7 @@ the semantic controls Sol uses while running the workflow.
 | `agents_inspect` | Materialize one selected result, diff, or tool output for targeted local search. |
 | `agents_send` | Steer work that is already in progress. |
 | `agents_wait` | Wait for a meaningful event from one or more workers. |
-| `agents_interrupt` | Stop a worker that is obsolete, blocked, or no longer useful. |
+| `agents_interrupt` | Stop a worker that is obsolete, while preserving a result that completed just before the interrupt. |
 | `agents_permission` | Decide a suspended write outside an authored scope. |
 | `agents_undo` | Revert an isolated worker turn when its safety checks pass. |
 | `agents_redo` | Restore that turn while the guarded redo window remains valid. |
