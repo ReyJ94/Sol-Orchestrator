@@ -118,13 +118,12 @@ test("generates exact Sol/worker authority without stale protocol prompts", () =
 
     assert.deepEqual(
       Object.keys(config.agent).sort(),
-      ["luna-max", "luna-medium", "sol", "terra-max", "terra-medium"]
+      ["luna-medium", "sol", "terra-max", "terra-medium"]
     )
     for (const name of WORKFLOW_TOOLS) {
       assert.equal(config.agent.sol.permission[name], "allow")
       for (const worker of [
         "luna-medium",
-        "luna-max",
         "terra-medium",
         "terra-max",
       ]) {
@@ -142,7 +141,6 @@ test("generates exact Sol/worker authority without stale protocol prompts", () =
     assert.match(config.agent.sol.prompt, /agents_inspect/u)
     for (const worker of [
       "luna-medium",
-      "luna-max",
       "terra-medium",
       "terra-max",
     ]) {

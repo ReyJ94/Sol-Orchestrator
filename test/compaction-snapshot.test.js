@@ -108,7 +108,7 @@ const seedRuntime = async (directory) => {
             dependsOn: [],
             jobs: [
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 dependsOn: [],
                 mode: "verification",
                 name: "inspect bounded worker state",
@@ -157,7 +157,7 @@ const seedRuntime = async (directory) => {
       live_state: "busy",
       mode: "verification",
       parent_session_id: parentID,
-      profile: "luna-max",
+      profile: "terra-max",
       run_sequence: 1,
       task_id: childID,
       updated_at: timestamp,
@@ -245,7 +245,7 @@ test("renders only semantic workflow and worker metadata", () => {
         live_state: "busy",
         mode: "verification",
         patch: PATCH_SENTINEL,
-        profile: "luna-max",
+        profile: "terra-max",
         result: RESULT_SENTINEL,
         result_available: true,
         task_id: childID,
@@ -288,7 +288,7 @@ test("renders only semantic workflow and worker metadata", () => {
           {
             jobs: [
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 mode: "verification",
                 name: "inspect bounded worker state",
                 objective: "Inspect only selected worker content.",

@@ -58,9 +58,6 @@ const worker = (description: string): AgentDefinition => ({
 });
 
 export const agentDefinitions = Object.freeze({
-  "luna-max": worker(
-    "Narrow leaf work requiring careful multi-step investigation, adversarial checking, or precise verification"
-  ),
   "luna-medium": worker(
     "Clear low-risk leaf work on one surface with an obvious method and easily checked result"
   ),
@@ -86,7 +83,6 @@ export const agentDefinitions = Object.freeze({
 
 const bundledWorkerProfileNames = [
   "luna-medium",
-  "luna-max",
   "terra-medium",
   "terra-max",
 ] as const;

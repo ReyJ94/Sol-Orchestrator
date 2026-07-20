@@ -53,7 +53,7 @@ const definition = (): WorkflowDefinition =>
           },
           {
             actor: {
-              profile: "luna-max",
+              profile: "terra-max",
               type: "worker",
             },
             dependsOn: ["frame parser claim"],

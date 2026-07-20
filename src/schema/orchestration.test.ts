@@ -38,7 +38,7 @@ const definition = {
         },
         {
           actor: {
-            profile: "luna-max" as const,
+            profile: "terra-max" as const,
             type: "worker" as const,
           },
           dependsOn: ["frame state contract"],
@@ -129,7 +129,7 @@ const worker = () => ({
   live_state: "review" as const,
   mode: "verification" as const,
   parent_session_id: "parent-1",
-  profile: "luna-max" as const,
+  profile: "terra-max" as const,
   run_sequence: 1,
   task_id: "task-1",
   updated_at: timestamp,

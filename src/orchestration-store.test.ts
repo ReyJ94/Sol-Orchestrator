@@ -198,7 +198,7 @@ describe("OrchestrationStore fresh namespace", () => {
                 dependsOn: [],
                 jobs: [
                   {
-                    actor: { profile: "luna-max", type: "worker" },
+                    actor: { profile: "terra-max", type: "worker" },
                     dependsOn: [],
                     mode: "verification",
                     name: "verify restart",
@@ -243,7 +243,7 @@ describe("OrchestrationStore fresh namespace", () => {
           live_state: "preempting",
           mode: "verification",
           parent_session_id: "parent-1",
-          profile: "luna-max",
+          profile: "terra-max",
           run_sequence: 1,
           task_id: "task-1",
           updated_at: timestamp,

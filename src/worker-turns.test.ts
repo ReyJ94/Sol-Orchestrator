@@ -237,7 +237,7 @@ const setup = async (
             dependsOn: [],
             jobs: [
               {
-                actor: { profile: "luna-max", type: "worker" },
+                actor: { profile: "terra-max", type: "worker" },
                 dependsOn: [],
                 mode: "verification",
                 name: job,
@@ -308,7 +308,7 @@ const setup = async (
         options.liveState ?? ((options.review ?? true) ? "review" : "busy"),
       mode: "verification",
       parent_session_id: parentSessionID,
-      profile: "luna-max",
+      profile: "terra-max",
       run_sequence: 1,
       task_id: taskID,
       updated_at: timestamp,
@@ -696,7 +696,7 @@ describe("WorkerTurns pull-based metadata", () => {
       job,
       live_state: "review",
       mode: "verification",
-      profile: "luna-max",
+      profile: "terra-max",
       result_available: true,
       turn_count: 1,
     });

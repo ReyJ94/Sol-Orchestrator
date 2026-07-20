@@ -9,21 +9,56 @@ import {
   workflowToolNames,
 } from "./agent-defaults.js";
 
-const APPLICABLE_SKILLS_PATTERN = /applicable .*skills/i;
-const BOUNDED_WAIT_PATTERN = /bounded `agents_wait`/u;
 const DEVELOPMENT_METHOD_PATTERN = /pre-GREEN|planning gate|deep primitives/i;
+const EXHAUSTIVE_TOOL_CATALOG_PATTERN =
+  /The five workflow tools have distinct purposes|^- `agents_status\(/mu;
+const TOOL_SCHEMA_OWNERSHIP_PATTERN =
+  /Enabled tool schemas own each call's local purpose and arguments/u;
+const SINGLE_MODE_SINGLE_OWNER_PATTERN =
+  /one mode, one owner, and one observable deliverable/u;
+const LOCAL_SOURCE_AUTHORITY_PATTERN =
+  /provided repository, local, or version-matched source is authoritative over web substitution/u;
+const STOP_AT_DELIVERABLE_PATTERN =
+  /stop when the requested evidence or output and its verification are complete/iu;
+const DRIFT_SUPERVISION_PATTERN =
+  /many completed tools with no progress or result|reopening settled decisions/u;
+const SOL_SKILL_FIRST_PATTERN =
+  /load applicable skills before substantive graph design.*shape the problem-specific method/iu;
+const SKILL_DIRECTED_GRAPH_PATTERN =
+  /for development work, load `development-loop` plus relevant domain skills.*determine what matters operationally.*stages, jobs, dependencies, actor choices, worker briefs, testing and implementation order, and acceptance evidence.*do not restate their methodology/iu;
+const SOL_OWNERSHIP_PATTERN =
+  /problem framing, architecture, decomposition, actor\/profile selection, dependency ordering, integration, verification judgment, and final decisions/iu;
+const GRAPH_SEMANTICS_PATTERN =
+  /meaningful evidence or decision gate.*smallest independently useful executable unit.*schema's substeps.*causal dependencies.*parallel independent work/iu;
+const EPISODIC_WORKFLOW_PATTERN =
+  /one goal may require multiple bounded workflows.*each workflow is one coherent execution episode/iu;
+const SEMANTIC_GRAPH_PATTERN =
+  /steps are ordered semantic stages or decision gates.*jobs are concrete substeps inside steps.*exactly one actor.*dependencies encode causal order.*independent jobs remain parallel/iu;
+const SOL_WORK_SELECTION_PATTERN =
+  /Use Sol for synthesis, architecture decisions, integration, acceptance, owner-level verification, and deciding the next workflow.*Use workers for bounded research, implementation, command execution, and independent verification/iu;
+const BINDING_SOL_JOB_PATTERN =
+  /Sol job objective is a binding executable obligation.*exact inputs.*decision or output.*stopping condition.*not a vague reminder/iu;
+const TOPOLOGY_DISCOVERY_PATTERN =
+  /discovery can change downstream topology.*end the workflow with Sol synthesis.*author the next workflow from that evidence rather than speculating it/iu;
+const DELEGATION_DEFAULT_PATTERN =
+  /Sol-owned jobs are reserved for framing, synthesis, architecture, integration, and judgment.*delegate bounded research, implementation, command execution, and independent verification by default when that protects Sol's context/iu;
+const NO_DUPLICATE_DELEGATION_PATTERN =
+  /never duplicate a delegated job.*direct execution remains valid when the user requests it or delegation overhead exceeds its value/iu;
+const WORKER_EXECUTION_ARM_PATTERN =
+  /execution arm with one decided mode, owner, and deliverable.*never chooses architecture, scope, workflow, or product policy/iu;
+const MODE_STOP_PATTERN =
+  /research returns evidence rather than plans.*implementation follows a decided design.*verification reports failures rather than fixing them/iu;
+const EVIDENCE_BOUNDARY_PATTERN =
+  /unrestricted read capability is not authority to expand the evidence surface.*honor explicit evidence and file boundaries/iu;
+const MISSING_DECISION_BLOCKER_PATTERN =
+  /architecture, scope, ownership, or product policy.*not already decided.*report a blocker and stop/iu;
 
 test("loads every worker profile from one shared prompt source", async () => {
   const sharedURL = new URL("../agents/worker.md", import.meta.url);
   const shared = await readFile(sharedURL, "utf8");
   const agents = await defaultAgents();
 
-  for (const name of [
-    "luna-medium",
-    "luna-max",
-    "terra-medium",
-    "terra-max",
-  ] as const) {
+  for (const name of ["luna-medium", "terra-medium", "terra-max"] as const) {
     expect(agents[name]?.prompt).toBe(shared);
     await expect(
       stat(new URL(`../agents/${name}.md`, import.meta.url))
@@ -85,26 +120,13 @@ test("keeps harness mechanics in prompts and development methodology in applicab
 
   expect(sol).toContain("available_actions");
   expect(sol).toContain("/goal-stop");
-  expect(sol).toMatch(BOUNDED_WAIT_PATTERN);
-  expect(sol).toMatch(APPLICABLE_SKILLS_PATTERN);
-  expect(sol).toContain("gather only enough read-only orientation context");
-  expect(sol).toContain("think again");
-  expect(sol).toContain("least expensive safe workers");
-  expect(sol).toContain("`workflow_status.available_workers` is authoritative");
-  expect(sol).toContain("configured OpenCode agent profile");
-  expect(sol).toContain("Minimize expensive-model execution");
+  expect(sol).toContain("call `workflow_status({})` first");
   expect(sol).toContain("Protect your context");
-  expect(sol).toContain("returns only private artifact file metadata");
-  expect(sol).toContain(
-    "ordinary terminal tools such as `rg`, globbing, and `jq`"
-  );
-  expect(sol).toContain("never injects the artifact body into your context");
-  expect(sol).toContain(
-    "creates, scopes, binds, and prompts that worker automatically"
-  );
-  expect(sol).toContain("binds consequential execution");
-  expect(sol).toContain("must help rather than imprison you");
-  expect(sol).toContain("agents_status({ job? })");
+  expect(sol).toContain("least expensive profile");
+  expect(sol).toContain("creates, scopes, binds, and prompts that worker");
+  expect(sol).toContain("include a revised objective");
+  expect(sol).toMatch(TOOL_SCHEMA_OWNERSHIP_PATTERN);
+  expect(sol).not.toMatch(EXHAUSTIVE_TOOL_CATALOG_PATTERN);
   expect(sol).not.toContain("required_next_action");
   expect(sol).not.toContain("task_id");
   expect(sol).not.toContain("next_actions");
@@ -117,10 +139,55 @@ test("keeps harness mechanics in prompts and development methodology in applicab
   expect(worker).toContain("call the structured tool and wait for Sol");
 });
 
+test("converges worker jobs on one bounded, locally authoritative deliverable", async () => {
+  const agents = await defaultAgents();
+  const sol = agents.sol?.prompt;
+  const worker = agents["luna-medium"]?.prompt;
+  if (sol === undefined || worker === undefined) {
+    throw new Error("Expected generated Sol and luna-medium prompts.");
+  }
+
+  expect(sol).toMatch(SINGLE_MODE_SINGLE_OWNER_PATTERN);
+  expect(sol).toMatch(LOCAL_SOURCE_AUTHORITY_PATTERN);
+  expect(worker).toMatch(LOCAL_SOURCE_AUTHORITY_PATTERN);
+  expect(worker).toMatch(STOP_AT_DELIVERABLE_PATTERN);
+  expect(sol).toMatch(DRIFT_SUPERVISION_PATTERN);
+  expect(sol).toContain("check `agents_status`");
+  expect(sol).toContain("steer once to the exact remaining deliverable");
+  expect(sol).toContain("interrupt or replace it if unchanged");
+});
+
+test("assigns control-plane judgment to Sol and bounded execution to workers", async () => {
+  const agents = await defaultAgents();
+  const sol = agents.sol?.prompt;
+  const worker = agents["luna-medium"]?.prompt;
+  if (sol === undefined || worker === undefined) {
+    throw new Error("Expected generated Sol and luna-medium prompts.");
+  }
+
+  expect(sol).toMatch(SOL_SKILL_FIRST_PATTERN);
+  expect(sol).toMatch(SKILL_DIRECTED_GRAPH_PATTERN);
+  expect(sol).toMatch(SOL_OWNERSHIP_PATTERN);
+  expect(sol).toMatch(GRAPH_SEMANTICS_PATTERN);
+  expect(sol).toMatch(EPISODIC_WORKFLOW_PATTERN);
+  expect(sol).toMatch(SEMANTIC_GRAPH_PATTERN);
+  expect(sol).toMatch(SOL_WORK_SELECTION_PATTERN);
+  expect(sol).toMatch(BINDING_SOL_JOB_PATTERN);
+  expect(sol).toMatch(TOPOLOGY_DISCOVERY_PATTERN);
+  expect(sol).toMatch(DELEGATION_DEFAULT_PATTERN);
+  expect(sol).toMatch(NO_DUPLICATE_DELEGATION_PATTERN);
+  expect(worker).toMatch(WORKER_EXECUTION_ARM_PATTERN);
+  expect(worker).toMatch(MODE_STOP_PATTERN);
+  expect(worker).toMatch(EVIDENCE_BOUNDARY_PATTERN);
+  expect(worker).toMatch(MISSING_DECISION_BLOCKER_PATTERN);
+  expect(worker).not.toContain(
+    "unless Sol later gives an explicit implementation brief"
+  );
+});
+
 describe("managed worker permission bootstrap", () => {
   test.each([
     "luna-medium",
-    "luna-max",
     "terra-medium",
     "terra-max",
   ])("keeps %s edit permission at ask when user config tries to weaken it", (name) => {
@@ -143,15 +210,34 @@ describe("managed worker permission bootstrap", () => {
   });
 
   test("does not add a read restriction to managed workers", () => {
-    for (const name of [
-      "luna-medium",
-      "luna-max",
-      "terra-medium",
-      "terra-max",
-    ] as const) {
+    for (const name of ["luna-medium", "terra-medium", "terra-max"] as const) {
       expect(agentDefinitions[name].permission).not.toHaveProperty("read");
       expect(agentDefinitions[name].permission).not.toHaveProperty("glob");
       expect(agentDefinitions[name].permission).not.toHaveProperty("grep");
     }
+  });
+
+  test("preserves user prompt, model, variant, and ordinary capability permissions", () => {
+    const merged = mergeAgentDefinition(agentDefinitions["luna-medium"], {
+      model: "openai/gpt-5.6-terra",
+      variant: "high",
+      prompt: "User-provided worker instructions.",
+      permission: {
+        edit: "allow",
+        skill: "allow",
+        webfetch: "allow",
+      },
+    });
+
+    expect(merged).toMatchObject({
+      model: "openai/gpt-5.6-terra",
+      variant: "high",
+      prompt: "User-provided worker instructions.",
+      permission: {
+        edit: "ask",
+        skill: "allow",
+        webfetch: "allow",
+      },
+    });
   });
 });

@@ -42,7 +42,7 @@ const graph = (): WorkflowDefinition =>
             objective: "Frame the work",
           },
           {
-            actor: { profile: "luna-max", type: "worker" },
+            actor: { profile: "terra-max", type: "worker" },
             dependsOn: ["frame"],
             mode: "research",
             name: "research",
