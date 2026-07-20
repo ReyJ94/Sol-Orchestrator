@@ -122,6 +122,10 @@ describe("GoalToolService lifecycle", () => {
       objective: "Deliver the promoted user outcome",
       status: "active",
     });
+    expect(status.current?.definition.objective).toBe(
+      "Current actionable work"
+    );
+    expect(status.current?.runtime.jobs.finish?.state).toBe("active");
     expect(root.workflows.workflows[0]?.goal_id).toBe(
       root.goals.goals[0]?.goal_id
     );

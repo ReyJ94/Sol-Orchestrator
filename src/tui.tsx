@@ -13,8 +13,8 @@ import { OrchestrationStore } from "./orchestration-store.js";
 import { parsePluginOptions } from "./plugin-options.js";
 import {
   type AvailableAction,
-  projectWorkflowStatus,
-  projectWorkflowSummary,
+  projectCanonicalWorkflowStatus,
+  projectCurrentWorkflow,
   workflowStartAvailableAction,
 } from "./workflow-projection.js";
 
@@ -56,44 +56,84 @@ type JobSummary = {
   readonly write_grants?: readonly string[];
 };
 
+type WorkerRuntimeSummary = Pick<
+  JobSummary,
+  | "latest_event"
+  | "live_state"
+  | "pending_write_permission"
+  | "result_available"
+  | "turns"
+  | "write_grants"
+>;
+type JobRuntimeSummary = Omit<
+  JobSummary,
+  | "actor"
+  | "live_state"
+  | "mode"
+  | "name"
+  | "objective"
+  | "turns"
+  | "write_grants"
+> & { readonly worker?: WorkerRuntimeSummary };
+
 type StepSummary = {
-  readonly jobs: readonly JobSummary[];
+  readonly dependsOn: readonly string[];
+  readonly jobs: readonly {
+    readonly actor: JobSummary["actor"];
+    readonly dependsOn: readonly string[];
+    readonly mode?: string;
+    readonly name: string;
+    readonly objective: string;
+    readonly writeFiles?: readonly string[];
+  }[];
   readonly name: string;
   readonly objective: string;
-  readonly state: string;
 };
 
 export type WorkflowSummary = {
   readonly available_actions: readonly AvailableAction[];
+  readonly current: {
+    readonly definition: {
+      readonly objective: string;
+      readonly steps: readonly StepSummary[];
+    };
+    readonly replacement_reason?: string;
+    readonly runtime: {
+      readonly jobs: Readonly<Record<string, JobRuntimeSummary>>;
+      readonly state: string;
+      readonly steps: Readonly<Record<string, { readonly state: string }>>;
+    };
+    readonly version: number;
+    readonly versions: readonly {
+      readonly replacement_reason?: string;
+      readonly version: number;
+    }[];
+  } | null;
   readonly goal?: {
     readonly objective: string;
     readonly status: string;
     readonly status_message?: string;
   };
-  readonly objective: string;
-  readonly state: string;
-  readonly steps: readonly StepSummary[];
-  readonly version: number | null;
 };
 
 const workflowDialogTitle = (summary: WorkflowSummary): string => {
   if (summary.goal === undefined) {
-    return `Workflow · v${summary.version ?? "?"} · ${summary.state}`;
+    return `Workflow · v${summary.current?.version ?? "?"} · ${summary.current?.runtime.state ?? "?"}`;
   }
-  if (summary.version === null) {
+  if (summary.current === null) {
     return `Goal · ${summary.goal.status} · between workflows`;
   }
-  return `Goal · ${summary.goal.status} · Workflow v${summary.version} · ${summary.state}`;
+  return `Goal · ${summary.goal.status} · Workflow v${summary.current.version} · ${summary.current.runtime.state}`;
 };
 
 const workflowControlLabel = (summary: WorkflowSummary): string => {
   if (summary.goal === undefined) {
-    return `Workflow ${summary.state}`;
+    return `Workflow ${summary.current?.runtime.state ?? "unavailable"}`;
   }
-  if (summary.version === null) {
+  if (summary.current === null) {
     return `Goal ${summary.goal.status} · between workflows`;
   }
-  return `Goal ${summary.goal.status} · Workflow ${summary.state}`;
+  return `Goal ${summary.goal.status} · Workflow ${summary.current.runtime.state}`;
 };
 
 type TuiDependencies = {
@@ -175,7 +215,7 @@ const defaultWorkflowSummary = async (
       return null;
     }
     if (record === undefined && goal !== undefined) {
-      const projection = projectWorkflowStatus(root, {
+      const projection = projectCanonicalWorkflowStatus(root, {
         agent: goal.orchestrator_agent_id,
         parent_session_id: parentID,
       });
@@ -188,21 +228,25 @@ const defaultWorkflowSummary = async (
             ? {}
             : { status_message: goal.status_message }),
         },
-        objective: goal.objective,
-        state: goal.status,
-        steps: [],
-        version: null,
+        current: null,
       };
     }
     if (record === undefined) {
       return null;
     }
-    const summary = projectWorkflowSummary(root, record, "all");
+    const current = projectCurrentWorkflow(root, record, "all");
+    const status = record.current
+      ? projectCanonicalWorkflowStatus(root, {
+          agent: record.orchestrator_agent_id,
+          parent_session_id: parentID,
+        })
+      : undefined;
     const associatedGoal = root.goals.goals.find(
       (candidate) => candidate.goal_id === record.goal_id
     );
     return {
-      ...summary,
+      available_actions: status?.available_actions ?? [],
+      current,
       ...(associatedGoal === undefined
         ? {}
         : {
@@ -218,34 +262,48 @@ const defaultWorkflowSummary = async (
   } catch (error) {
     return {
       available_actions: [],
-      objective: `Workflow state unavailable: ${errorMessage(error)}`,
-      state: "degraded",
-      steps: [],
-      version: null,
+      current: {
+        definition: {
+          objective: `Workflow state unavailable: ${errorMessage(error)}`,
+          steps: [],
+        },
+        runtime: { jobs: {}, state: "degraded", steps: {} },
+        version: 0,
+        versions: [],
+      },
     };
   }
 };
 
-const actorLabel = (job: JobSummary): string =>
-  job.actor.type === "orchestrator" ? "Sol" : (job.actor.profile ?? "worker");
+const actorLabel = (actor: JobSummary["actor"]): string =>
+  actor.type === "orchestrator" ? "Sol" : (actor.profile ?? "worker");
 
-const jobDescription = (job: JobSummary): string =>
+const jobDescription = (
+  job: JobRuntimeSummary,
+  actor: JobSummary["actor"],
+  mode: string | undefined
+): string =>
   [
-    actorLabel(job),
-    job.mode,
-    job.live_state,
-    job.result_available ? "result available" : undefined,
-    job.latest_event?.message,
-    job.status_message,
-    job.pending_write_permission
-      ? `permission: ${job.pending_write_permission.tool} ${job.pending_write_permission.paths.join(", ")}`
+    actorLabel(actor),
+    mode,
+    job.worker?.live_state,
+    job.result_available || job.worker?.result_available
+      ? "result available"
       : undefined,
-    job.write_grants && job.write_grants.length > 0
-      ? `grants: ${job.write_grants.join(", ")}`
+    job.worker?.latest_event?.message,
+    job.status_message,
+    job.worker?.pending_write_permission
+      ? `permission: ${job.worker.pending_write_permission.tool} ${job.worker.pending_write_permission.paths.join(", ")}`
+      : undefined,
+    job.worker?.write_grants && job.worker.write_grants.length > 0
+      ? `grants: ${job.worker.write_grants.join(", ")}`
       : undefined,
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
+
+const dependencyDescription = (dependencies: readonly string[]): string =>
+  `depends on: ${dependencies.length === 0 ? "none" : dependencies.join(", ")}`;
 
 const workflowOptions = (summary: WorkflowSummary) => [
   ...(summary.goal === undefined
@@ -257,35 +315,56 @@ const workflowOptions = (summary: WorkflowSummary) => [
           value: "goal",
         },
       ]),
-  ...summary.steps.flatMap((step) => [
-    {
-      description: step.objective,
-      title: `Step · ${step.name} · ${step.state}`,
-      value: `step:${step.name}`,
-    },
-    ...step.jobs.flatMap((job) => [
-      {
-        description: jobDescription(job),
-        title: `  Job · ${job.name} · ${job.state}`,
-        value: `job:${job.name}`,
-      },
-      ...job.turns.flatMap((turn) =>
-        turn.files.length === 0
-          ? [
-              {
-                description: `turn ${turn.turn} · ${turn.isolated ? "isolated" : "shared"} · ${turn.undo_available ? "undo available" : "undo unavailable"}`,
-                title: `    Turn ${turn.turn}`,
-                value: `turn:${job.name}:${turn.turn}`,
-              },
-            ]
-          : turn.files.map((file) => ({
-              description: `turn ${turn.turn} · ${file.status}`,
-              title: `    ${file.path} · +${file.additions} -${file.deletions} · ${turn.isolated ? "isolated" : "shared"} · ${turn.undo_available ? "undo" : "no undo"}`,
-              value: `turn:${job.name}:${turn.turn}:${file.path}`,
-            }))
-      ),
-    ]),
-  ]),
+  ...(summary.current === null
+    ? []
+    : summary.current.definition.steps.flatMap((step) => {
+        const stepRuntime = summary.current?.runtime.steps[step.name];
+        return [
+          {
+            description: `${step.objective} · ${dependencyDescription(step.dependsOn)}`,
+            title: `Step · ${step.name} · ${stepRuntime?.state ?? "unavailable"}`,
+            value: `step:${step.name}`,
+          },
+          ...step.jobs.flatMap((job) => [
+            {
+              description: `${jobDescription(
+                summary.current?.runtime.jobs[job.name] ?? {
+                  result_available: false,
+                  state: "unavailable",
+                },
+                job.actor,
+                job.mode
+              )} · ${dependencyDescription(job.dependsOn)}`,
+              title: `  Job · ${job.name} · ${summary.current?.runtime.jobs[job.name]?.state ?? "unavailable"}`,
+              value: `job:${job.name}`,
+            },
+            ...(
+              summary.current?.runtime.jobs[job.name]?.worker?.turns ?? []
+            ).flatMap((turn) =>
+              turn.files.length === 0
+                ? [
+                    {
+                      description: `turn ${turn.turn} · ${turn.isolated ? "isolated" : "shared"} · ${turn.undo_available ? "undo available" : "undo unavailable"}`,
+                      title: `    Turn ${turn.turn}`,
+                      value: `turn:${job.name}:${turn.turn}`,
+                    },
+                  ]
+                : turn.files.map((file) => ({
+                    description: `turn ${turn.turn} · ${file.status}`,
+                    title: `    ${file.path} · +${file.additions} -${file.deletions} · ${turn.isolated ? "isolated" : "shared"} · ${turn.undo_available ? "undo" : "no undo"}`,
+                    value: `turn:${job.name}:${turn.turn}:${file.path}`,
+                  }))
+            ),
+          ]),
+        ];
+      })),
+  ...(summary.current?.versions ?? [])
+    .filter((version) => version.replacement_reason !== undefined)
+    .map((version) => ({
+      description: "Recorded replacement of the current workflow definition",
+      title: `Replacement · v${version.version} · ${version.replacement_reason}`,
+      value: `replacement:${version.version}`,
+    })),
   ...summary.available_actions.map((action, index) => ({
     description: "Currently available semantic action",
     title: `Available · ${exactCall(action)}`,
@@ -373,7 +452,11 @@ export const createSolOrchestratorTuiPlugin =
         <DialogSelect
           onSelect={() => undefined}
           options={workflowOptions(summary)}
-          placeholder={summary.objective}
+          placeholder={
+            summary.current?.definition.objective ??
+            summary.goal?.objective ??
+            "Workflow"
+          }
           title={workflowDialogTitle(summary)}
         />
       ));
@@ -459,8 +542,9 @@ export const createSolOrchestratorTuiPlugin =
               >
                 <text
                   fg={
-                    summary().state === "blocked" ||
-                    summary().state === "degraded"
+                    summary().goal?.status === "blocked" ||
+                    summary().current?.runtime.state === "blocked" ||
+                    summary().current?.runtime.state === "degraded"
                       ? api.theme.current.warning
                       : api.theme.current.textMuted
                   }

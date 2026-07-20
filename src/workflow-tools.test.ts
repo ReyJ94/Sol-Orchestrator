@@ -5,6 +5,7 @@ import {
   emptyRootSnapshot,
   RootSnapshotSchema,
 } from "./schema/orchestration.js";
+import type { WorkflowDefinition } from "./schema/workflow.js";
 import { normalizeWorkflowDefinition } from "./workflow-graph.js";
 import { WorkflowState } from "./workflow-state.js";
 import {
@@ -18,13 +19,49 @@ const context = { agent: "sol", parent_session_id: "parent-1" };
 const bulkContentPattern = /result_body|transcript|patch_text/i;
 const currentWorkflowPattern = /unfinished|current/i;
 const internalStatusPattern =
-  /workflow_id|version|lease|prompt_id|message_id|run_id|evidence_id/i;
+  /workflow_id|lease|prompt_id|message_id|run_id|evidence_id/i;
 const launchFailurePattern = /could not launch/i;
 const recoveryCandidatesPattern = /frame|research/i;
 const reviewAndSolCandidatesPattern = /research|frame|parallel sol/i;
 const solCandidatesPattern = /frame|parallel sol/i;
-const versionPattern = /version|workflow_id/i;
 const unavailableProfilePattern = /missing-profile.*local-verifier/u;
+
+type ExpectedCurrentProjection = {
+  readonly definition: WorkflowDefinition;
+  readonly prior_version?: {
+    readonly definition: WorkflowDefinition;
+    readonly replacement_reason?: string;
+    readonly version: number;
+  };
+  readonly replacement_reason?: string;
+  readonly runtime: {
+    readonly jobs: Readonly<
+      Record<
+        string,
+        {
+          readonly result_available: boolean;
+          readonly state: string;
+          readonly status_message?: string;
+          readonly worker?: Readonly<Record<string, unknown>>;
+        }
+      >
+    >;
+    readonly state: string;
+    readonly steps: Readonly<Record<string, { readonly state: string }>>;
+  };
+  readonly version: number;
+  readonly versions: readonly {
+    readonly replacement_reason?: string;
+    readonly version: number;
+  }[];
+};
+
+const currentProjection = (value: unknown): ExpectedCurrentProjection => {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Expected a populated current workflow projection.");
+  }
+  return value as ExpectedCurrentProjection;
+};
 
 const required = <Value>(value: Value | undefined, message: string): Value => {
   if (value === undefined) {
@@ -242,11 +279,11 @@ describe("workflow tool definitions", () => {
       )
     );
 
-    expect(output.current.steps[0].jobs[1]).toMatchObject({
-      job: "research",
-      live_state: "starting",
-      profile: "terra-max",
+    expect(output.current.runtime.jobs.research).toMatchObject({
       state: "active",
+      worker: {
+        live_state: "starting",
+      },
     });
     expect(JSON.stringify(output)).not.toContain("required_next_action");
   });
@@ -346,10 +383,9 @@ describe("graph-driven worker execution", () => {
       ["inspect runtime", "verify contract"]
     );
     expect(maximumInFlight).toBe(2);
-    expect(status.current?.steps[0]?.jobs.map((job) => job.state)).toEqual([
-      "active",
-      "active",
-    ]);
+    const current = currentProjection(status.current);
+    expect(current.runtime.jobs["inspect runtime"]?.state).toBe("active");
+    expect(current.runtime.jobs["verify contract"]?.state).toBe("active");
     expect(
       status.available_actions.some(
         (action) => action.tool === "workflow_delegate"
@@ -396,7 +432,9 @@ describe("graph-driven worker execution", () => {
     expect(launches.map((launch) => launch.definition_job.name)).toEqual([
       "research owner",
     ]);
-    expect(status.current?.steps[1]?.jobs[0]?.state).toBe("pending");
+    expect(
+      currentProjection(status.current).runtime.jobs["implement owner"]?.state
+    ).toBe("pending");
     state.markWorkerReview({
       job: "research owner",
       result_available: true,
@@ -413,7 +451,9 @@ describe("graph-driven worker execution", () => {
       "research owner",
       "implement owner",
     ]);
-    expect(accepted.current?.steps[1]?.jobs[0]?.state).toBe("active");
+    expect(
+      currentProjection(accepted.current).runtime.jobs["implement owner"]?.state
+    ).toBe("active");
   });
 
   test("isolates one native launch failure and retry starts only that job", async () => {
@@ -453,14 +493,10 @@ describe("graph-driven worker execution", () => {
     );
 
     expect(
-      started.current?.steps[0]?.jobs.find(
-        (job) => job.name === "healthy worker"
-      )?.state
+      currentProjection(started.current).runtime.jobs["healthy worker"]?.state
     ).toBe("active");
     expect(
-      started.current?.steps[0]?.jobs.find(
-        (job) => job.name === "unavailable worker"
-      )
+      currentProjection(started.current).runtime.jobs["unavailable worker"]
     ).toMatchObject({
       state: "blocked",
       status_message: expect.stringMatching(launchFailurePattern),
@@ -482,9 +518,8 @@ describe("graph-driven worker execution", () => {
       )
     ).toHaveLength(2);
     expect(
-      retried.current?.steps[0]?.jobs.find(
-        (job) => job.name === "unavailable worker"
-      )?.state
+      currentProjection(retried.current).runtime.jobs["unavailable worker"]
+        ?.state
     ).toBe("active");
   });
 
@@ -522,8 +557,12 @@ describe("graph-driven worker execution", () => {
     ]);
 
     expect(launches).toHaveLength(1);
-    expect(left.current?.steps[0]?.jobs[0]?.state).toBe("active");
-    expect(right.current?.steps[0]?.jobs[0]?.state).toBe("active");
+    expect(
+      currentProjection(left.current).runtime.jobs["recover verifier"]?.state
+    ).toBe("active");
+    expect(
+      currentProjection(right.current).runtime.jobs["recover verifier"]?.state
+    ).toBe("active");
   });
 });
 
@@ -565,6 +604,7 @@ describe("WorkflowToolService status and selection", () => {
             mode: "verification" as const,
             name: "verify locally",
             objective: "Verify one local surface",
+            writeFiles: [],
           },
         ],
         name: "verify",
@@ -577,8 +617,15 @@ describe("WorkflowToolService status and selection", () => {
       context
     );
     expect(status.available_workers).toEqual(customProfiles);
-    expect(status.current?.steps[0]?.jobs[0]).toMatchObject({
+    expect(
+      currentProjection(status.current).definition.steps[0]?.jobs[0]
+    ).toMatchObject({
       actor: { profile: "local-verifier", type: "worker" },
+      writeFiles: [],
+    });
+    expect(
+      currentProjection(status.current).runtime.jobs["verify locally"]
+    ).toMatchObject({
       state: "active",
     });
 
@@ -612,25 +659,36 @@ describe("WorkflowToolService status and selection", () => {
     const status = await start(service);
     const serialized = JSON.stringify(status);
 
-    expect(status.current?.objective).toBe("Exercise tool semantics");
-    expect(status.current?.steps.map((step) => step.name)).toEqual([
+    const current = currentProjection(status.current);
+    expect(current.version).toBe(1);
+    expect(current.definition.objective).toBe("Exercise tool semantics");
+    expect(current.definition.steps.map((step) => step.name)).toEqual([
       "establish",
       "parallel",
       "change",
     ]);
-    expect(status.current?.steps[0]?.jobs.map((job) => job.name)).toEqual([
+    expect(current.definition.steps[0]?.jobs.map((job) => job.name)).toEqual([
       "frame",
       "research",
       "integrate",
     ]);
-    expect("jobs" in (status.current ?? {})).toBe(false);
-    const projectedJobs = status.current?.steps.flatMap((step) => step.jobs);
-    expect(projectedJobs?.find((job) => job.name === "frame")?.state).toBe(
-      "active"
+    expect(current.definition).toEqual(
+      normalizeWorkflowDefinition({
+        objective: "Exercise tool semantics",
+        steps: steps(),
+      })
     );
-    expect(projectedJobs?.find((job) => job.name === "research")?.state).toBe(
-      "active"
+    expect(current.runtime.jobs.frame?.state).toBe("active");
+    expect(current.runtime.jobs.research?.state).toBe("active");
+    expect(current.runtime.steps.establish?.state).toBe("active");
+    expect(current.runtime.jobs.research?.worker).not.toHaveProperty("job");
+    expect(current.runtime.jobs.research?.worker).not.toHaveProperty("mode");
+    expect(current.runtime.jobs.research?.worker).not.toHaveProperty("profile");
+    expect(current.runtime.jobs.research?.worker).not.toHaveProperty(
+      "writeFiles"
     );
+    expect(status.current).not.toHaveProperty("objective");
+    expect(status.current).not.toHaveProperty("steps");
     expect(serialized).not.toContain("internal-workflow-id");
     expect(serialized).not.toMatch(internalStatusPattern);
     expect(serialized).not.toMatch(bulkContentPattern);
@@ -715,9 +773,8 @@ describe("WorkflowToolService status and selection", () => {
     run.write_grants = ["src/extra.ts"];
 
     const status = await service.status({}, context);
-    const research = status.current?.steps
-      .flatMap((step) => step.jobs)
-      .find((job) => job.name === "research");
+    const research = currentProjection(status.current).runtime.jobs.research
+      ?.worker;
 
     expect(research).toMatchObject({
       latest_event: {
@@ -1066,6 +1123,43 @@ describe("WorkflowToolService status and selection", () => {
     expect(start(service)).rejects.toThrow(currentWorkflowPattern);
   });
 
+  test("keeps a completed workflow out of version lookup while retaining its active goal", async () => {
+    const { service, state } = harness();
+    await service.start(
+      {
+        objective: "Finish one bounded workflow",
+        steps: [
+          {
+            jobs: [
+              {
+                actor: { type: "orchestrator" },
+                name: "finish",
+                objective: "Finish the workflow",
+              },
+            ],
+            name: "finish",
+            objective: "Finish the workflow",
+          },
+        ],
+      },
+      context
+    );
+
+    const completed = await service.complete(
+      { message: "The bounded workflow is finished." },
+      context
+    );
+    const requestedVersion = await service.status({ version: 1 }, context);
+
+    expect(completed.current).toBeNull();
+    expect(requestedVersion.current).toBeNull();
+    expect(requestedVersion.goal).toEqual({
+      objective: "Finish one bounded workflow",
+      status: "active",
+    });
+    expect(state.snapshot().workflows[0]?.current).toBe(false);
+  });
+
   test("requires semantic job selection only when several Sol obligations are completable", async () => {
     const { service, state } = harness();
     await start(service);
@@ -1134,6 +1228,115 @@ describe("WorkflowToolService status and selection", () => {
 });
 
 describe("WorkflowToolService replacement and retry", () => {
+  test("keeps default status on the current definition while exposing summaries and one requested prior version", async () => {
+    const { service } = harness();
+    await start(service);
+    const replacements = [
+      "The first evidence changed the authored hierarchy.",
+      "The second evidence changed the authored hierarchy.",
+      "The third evidence changed the authored hierarchy.",
+      "The fourth evidence changed the authored hierarchy.",
+      "The fifth evidence changed the authored hierarchy.",
+      "The sixth evidence changed the authored hierarchy.",
+    ] as const;
+    let defaultStatus:
+      | Awaited<ReturnType<WorkflowToolService["replace"]>>
+      | undefined;
+    for (const [index, reason] of replacements.entries()) {
+      const revisedSteps = structuredClone(steps());
+      required(revisedSteps[1], "Expected revised parallel step.").objective =
+        `Establish revision ${index + 1}`;
+      defaultStatus = await service.replace(
+        { reason, steps: revisedSteps },
+        context
+      );
+    }
+
+    const finalStatus = required(
+      defaultStatus,
+      "Expected the final replacement status."
+    );
+    const current = currentProjection(finalStatus.current);
+    expect(current.version).toBe(7);
+    expect(current.definition.steps[1]?.objective).toBe("Establish revision 6");
+    expect(current.versions).toEqual([
+      {
+        replacement_reason:
+          "The second evidence changed the authored hierarchy.",
+        version: 3,
+      },
+      {
+        replacement_reason:
+          "The third evidence changed the authored hierarchy.",
+        version: 4,
+      },
+      {
+        replacement_reason:
+          "The fourth evidence changed the authored hierarchy.",
+        version: 5,
+      },
+      {
+        replacement_reason:
+          "The fifth evidence changed the authored hierarchy.",
+        version: 6,
+      },
+      {
+        replacement_reason:
+          "The sixth evidence changed the authored hierarchy.",
+        version: 7,
+      },
+    ]);
+    expect(current).not.toHaveProperty("prior_version");
+    expect(JSON.stringify(finalStatus)).not.toContain("Establish revision 1");
+
+    const historical = await service.status({ version: 1 }, context);
+    const historicalCurrent = currentProjection(historical.current);
+    expect(historicalCurrent.definition.steps[1]?.objective).toBe(
+      "Establish revision 6"
+    );
+    expect(historicalCurrent.prior_version).toEqual({
+      definition: normalizeWorkflowDefinition({
+        objective: "Exercise tool semantics",
+        steps: steps(),
+      }),
+      version: 1,
+    });
+    expect(JSON.stringify(historical)).not.toContain("internal-workflow-id");
+  });
+
+  test("reuses the complete populated current definition without reconstructing its DAG", async () => {
+    const { service } = harness();
+    const started = await start(service);
+    const before = currentProjection(started.current);
+
+    const replaced = await service.replace(
+      {
+        reason: "Re-author the known graph without semantic changes.",
+        steps: before.definition.steps,
+      },
+      context
+    );
+    const after = currentProjection(replaced.current);
+
+    expect(after.version).toBe(2);
+    expect(after.definition).toEqual(before.definition);
+    expect(after.replacement_reason).toBe(
+      "Re-author the known graph without semantic changes."
+    );
+    expect(after.definition.steps[2]?.dependsOn).toEqual([
+      "establish",
+      "parallel",
+    ]);
+    expect(after.definition.steps[0]?.jobs[2]?.dependsOn).toEqual([
+      "frame",
+      "research",
+    ]);
+    expect(after.definition.steps[0]?.jobs[1]).not.toHaveProperty("writeFiles");
+    expect(after.definition.steps[2]?.jobs[0]?.writeFiles).toEqual([
+      "src/owner.ts",
+    ]);
+  });
+
   test("replacement after launch creates only one next version", async () => {
     const { launches, service, state } = harness();
     await start(service);
@@ -1170,7 +1373,10 @@ describe("WorkflowToolService replacement and retry", () => {
         (launch) => launch.definition_job.name === "verify framing"
       )
     ).toHaveLength(1);
-    expect(JSON.stringify(status)).not.toMatch(versionPattern);
+    expect(currentProjection(status.current).version).toBe(2);
+    expect(currentProjection(status.current).replacement_reason).toBe(
+      "The final stage objective needs correction."
+    );
   });
 
   test("updates the workflow and associated durable goal objective on a scope change", async () => {
@@ -1187,7 +1393,9 @@ describe("WorkflowToolService replacement and retry", () => {
     );
     const root = await store.readRoot();
 
-    expect(status.current?.objective).toBe("Deliver the revised user outcome");
+    expect(currentProjection(status.current).definition.objective).toBe(
+      "Deliver the revised user outcome"
+    );
     expect(status.goal?.objective).toBe("Deliver the revised user outcome");
     expect(root.goals.goals[0]?.objective).toBe(
       "Deliver the revised user outcome"
@@ -1206,7 +1414,9 @@ describe("WorkflowToolService replacement and retry", () => {
       context
     );
 
-    expect(status.current?.objective).toBe("Exercise tool semantics");
+    expect(currentProjection(status.current).definition.objective).toBe(
+      "Exercise tool semantics"
+    );
     expect(status.goal?.objective).toBe("Exercise tool semantics");
   });
 

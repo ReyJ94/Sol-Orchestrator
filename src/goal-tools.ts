@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import type { GoalState } from "./goal-state.js";
 import type { RootSnapshot } from "./schema/orchestration.js";
-import { projectWorkflowStatus } from "./workflow-projection.js";
+import { projectCanonicalWorkflowStatus } from "./workflow-projection.js";
 import type { WorkflowState } from "./workflow-state.js";
 
 const MessageSchema = z.string().trim().min(1).max(4000);
@@ -107,7 +107,10 @@ export class GoalToolService {
   }
 
   async status(context: GoalToolContext) {
-    return projectWorkflowStatus(await this.#store.readRoot(), context);
+    return projectCanonicalWorkflowStatus(
+      await this.#store.readRoot(),
+      context
+    );
   }
 
   async #transition(

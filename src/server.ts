@@ -40,7 +40,11 @@ import type {
 } from "./schema/orchestration.js";
 import { WorkerLauncher } from "./worker-launcher.js";
 import { WorkerTurns } from "./worker-turns.js";
-import { projectWorker, projectWorkflowStatus } from "./workflow-projection.js";
+import {
+  projectCanonicalWorkflowStatus,
+  projectWorker,
+  projectWorkflowStatus,
+} from "./workflow-projection.js";
 import {
   createWorkflowToolDefinitions,
   WorkflowToolService,
@@ -3046,7 +3050,7 @@ export const SolOrchestratorPlugin = (
       const workflow =
         ownerAgent === undefined
           ? null
-          : projectWorkflowStatus(
+          : projectCanonicalWorkflowStatus(
               root,
               {
                 agent: ownerAgent,

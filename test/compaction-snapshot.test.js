@@ -113,10 +113,24 @@ const seedRuntime = async (directory) => {
                 mode: "verification",
                 name: "inspect bounded worker state",
                 objective: "Inspect only selected worker content.",
+                writeFiles: ["src/**", "test/compaction-snapshot.test.js"],
               },
             ],
             name: "inspect",
             objective: "Keep compaction metadata-only.",
+          },
+          {
+            dependsOn: ["inspect"],
+            jobs: [
+              {
+                actor: { type: "orchestrator" },
+                dependsOn: [],
+                name: "integrate semantic continuity",
+                objective: "Integrate the compacted workflow evidence.",
+              },
+            ],
+            name: "integrate",
+            objective: "Decide the next durable workflow action.",
           },
         ],
       },
@@ -141,7 +155,7 @@ const seedRuntime = async (directory) => {
       updated_at: timestamp,
       workflow_id: "workflow-internal-1",
       workflow_version: 1,
-      write_grants: [],
+      write_grants: ["docs/approved.md"],
     })
     root.workers.push({
       child_session_id: childID,
@@ -163,6 +177,14 @@ const seedRuntime = async (directory) => {
       updated_at: timestamp,
       workflow_id: "workflow-internal-1",
       workflow_version: 1,
+    })
+    root.permissions.push({
+      created_at: timestamp,
+      permission: "edit",
+      request_id: "permission-internal-1",
+      requested_paths: ["docs/approved.md"],
+      task_id: childID,
+      tool: "apply_patch",
     })
     root.turns.push({
       boundary_message_id: "user-internal-1",
@@ -395,6 +417,257 @@ test("never presents a silently partial action surface after compaction", () => 
   assert.equal(bounded.workflow.available_actions_refresh_required, true)
 })
 
+test("keeps a canonical current definition and its decision runtime atomic when it fits", () => {
+  const job = `exact job ${"x".repeat(240)}`
+  const blocker = `Blocked by the exact external condition: ${"y".repeat(1200)}`
+  const definition = {
+    objective: "Keep the authored DAG and exact authority scope after compaction.",
+    steps: [
+      {
+        dependsOn: [],
+        jobs: [
+          {
+            actor: { profile: "terra-max", type: "worker" },
+            dependsOn: [],
+            mode: "implementation",
+            name: job,
+            objective: "Change only the explicitly authorized files.",
+            writeFiles: ["src/**", "test/compaction-snapshot.test.js"],
+          },
+          {
+            actor: { profile: "terra-medium", type: "worker" },
+            dependsOn: [job],
+            mode: "verification",
+            name: "verify an explicitly empty write scope",
+            objective: "Verify without any file authority.",
+            writeFiles: [],
+          },
+        ],
+        name: "implement",
+        objective: "Implement the bounded change.",
+      },
+      {
+        dependsOn: ["implement"],
+        jobs: [
+          {
+            actor: { type: "orchestrator" },
+            dependsOn: [],
+            name: "review exact result",
+            objective: "Review the bounded result.",
+          },
+        ],
+        name: "review",
+        objective: "Accept or revise the implementation.",
+      },
+    ],
+  }
+  const availableActions = [
+    {
+      args: { job },
+      needs: ["decision"],
+      tool: "agents_permission",
+    },
+    {
+      args: { jobs: [job], until: "any" },
+      tool: "agents_wait",
+    },
+  ]
+  const rendered = renderCompactionSnapshot({
+    maxChars: 12_000,
+    workflow: {
+      available_actions: availableActions,
+      current: {
+        definition,
+        runtime: {
+          jobs: {
+            [job]: {
+              result_available: false,
+              state: "blocked",
+              status_message: blocker,
+              worker: {
+                diff_available: true,
+                latest_event: { kind: "blocker", message: blocker },
+                live_state: "blocked",
+                pending_write_permission: {
+                  paths: ["docs/approved.md"],
+                  tool: "apply_patch",
+                },
+                result_body: RESULT_SENTINEL,
+                result_available: false,
+                tool_output_available: false,
+                turn_count: 0,
+                turns: [],
+                write_grants: ["docs/approved.md"],
+              },
+            },
+            "review exact result": {
+              result_available: false,
+              state: "pending",
+            },
+            "verify an explicitly empty write scope": {
+              result_available: false,
+              state: "pending",
+            },
+          },
+          state: "blocked",
+          steps: {
+            implement: { state: "blocked" },
+            review: { state: "pending" },
+          },
+        },
+        version: 7,
+      },
+      goal: {
+        liveness: { message: "Native continuation failed.", state: "failed" },
+        objective: "Complete the durable user outcome.",
+        status: "blocked",
+        status_message: blocker,
+      },
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.deepEqual(data.workflow.current.definition, definition)
+  assert.equal(data.workflow.current.version, 7)
+  assert.equal(data.workflow.current.runtime.jobs[job].status_message, blocker)
+  assert.deepEqual(data.workflow.current.runtime.jobs[job].worker.latest_event, {
+    kind: "blocker",
+    message: blocker,
+  })
+  assert.deepEqual(
+    data.workflow.current.runtime.jobs[job].worker.pending_write_permission,
+    { paths: ["docs/approved.md"], tool: "apply_patch" }
+  )
+  assert.deepEqual(
+    data.workflow.current.runtime.jobs[job].worker.write_grants,
+    ["docs/approved.md"]
+  )
+  assert.deepEqual(data.workflow.available_actions, availableActions)
+  assert.deepEqual(data.workflow.goal.liveness, {
+    message: "Native continuation failed.",
+    state: "failed",
+  })
+  assert.equal(data.workflow.definition_refresh_required, undefined)
+  assert.equal(JSON.stringify(data).includes(RESULT_SENTINEL), false)
+  assert.equal(rendered.length <= 12_000, true)
+})
+
+test("never truncates an oversized current definition and directs Sol to workflow_status", () => {
+  const objective = "definition sentinel ".repeat(300)
+  const rendered = renderCompactionSnapshot({
+    maxChars: 1024,
+    workflow: {
+      available_actions: [
+        { args: { job: "oversized definition job" }, tool: "agents_status" },
+      ],
+      current: {
+        definition: {
+          objective,
+          steps: [
+            {
+              dependsOn: [],
+              jobs: [
+                {
+                  actor: { profile: "terra-max", type: "worker" },
+                  dependsOn: [],
+                  mode: "research",
+                  name: "oversized definition job",
+                  objective,
+                  writeFiles: ["src/**"],
+                },
+              ],
+              name: "oversized",
+              objective,
+            },
+          ],
+        },
+        runtime: {
+          jobs: {
+            "oversized definition job": {
+              result_available: false,
+              state: "active",
+            },
+          },
+          state: "active",
+          steps: { oversized: { state: "active" } },
+        },
+        version: 4,
+      },
+      goal: null,
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.equal(rendered.length <= 1024, true)
+  assert.equal(JSON.stringify(data).includes("definition sentinel"), false)
+  assert.equal(data.workflow.current.definition, undefined)
+  assert.deepEqual(data.workflow.definition_refresh_required, {
+    args: {},
+    tool: "workflow_status",
+  })
+  assert.deepEqual(data.workflow.available_actions, [])
+  assert.deepEqual(data.workflow.available_actions_refresh_required, {
+    args: {},
+    tool: "workflow_status",
+  })
+})
+
+test("retains a fitting current definition when only the exact action surface overflows", () => {
+  const definition = {
+    objective: "Preserve the definition even when action availability needs refresh.",
+    steps: [
+      {
+        dependsOn: [],
+        jobs: [
+          {
+            actor: { type: "orchestrator" },
+            dependsOn: [],
+            name: "make the semantic decision",
+            objective: "Make the next semantic decision.",
+          },
+        ],
+        name: "decide",
+        objective: "Keep the compact definition intact.",
+      },
+    ],
+  }
+  const rendered = renderCompactionSnapshot({
+    maxChars: 1024,
+    workflow: {
+      available_actions: Array.from({ length: 20 }, (_value, index) => ({
+        args: { job: `semantic action ${index} ${"x".repeat(60)}` },
+        needs: ["message"],
+        tool: "workflow_complete",
+      })),
+      current: {
+        definition,
+        runtime: {
+          jobs: {
+            "make the semantic decision": {
+              result_available: false,
+              state: "active",
+            },
+          },
+          state: "active",
+          steps: { decide: { state: "active" } },
+        },
+        version: 2,
+      },
+      goal: null,
+    },
+  })
+  const data = parseSnapshot(rendered)
+
+  assert.equal(rendered.length <= 1024, true)
+  assert.deepEqual(data.workflow.current.definition, definition)
+  assert.deepEqual(data.workflow.available_actions, [])
+  assert.deepEqual(data.workflow.available_actions_refresh_required, {
+    args: {},
+    tool: "workflow_status",
+  })
+  assert.equal(data.workflow.definition_refresh_required, undefined)
+})
+
 test("retains a durable goal between workflows without internal identity", () => {
   const rendered = renderCompactionSnapshot({
     workflow: {
@@ -456,6 +729,35 @@ test("produces deterministic valid JSON within configured bounds", () => {
   }
 })
 
+test("keeps the hard compaction fallback within bounds for oversized legacy fields", () => {
+  const rendered = renderCompactionSnapshot({
+    maxChars: 1024,
+    workers: [
+      {
+        job: "worker ".repeat(300),
+        latest_event: { kind: "blocker", message: "message ".repeat(300) },
+        live_state: "blocked",
+      },
+    ],
+    workflow: {
+      available_actions: [
+        { args: { job: "worker ".repeat(300) }, tool: "agents_interrupt" },
+      ],
+      current: {
+        objective: "objective ".repeat(300),
+        state: "blocked",
+        steps: [],
+      },
+    },
+  })
+
+  assert.equal(rendered.length <= 1024, true)
+  const data = parseSnapshot(rendered)
+  assert.equal(data.truncated, true)
+  assert.deepEqual(data.workflow.available_actions, [])
+  assert.equal(data.workflow.available_actions_refresh_required, true)
+})
+
 test("server compaction appends one persisted metadata snapshot without reading child history", async () =>
   temporaryDirectory(async (directory) => {
     const { runtime, sessions } = await seedRuntime(directory)
@@ -481,7 +783,28 @@ test("server compaction appends one persisted metadata snapshot without reading 
       callsBefore
     )
     const data = parseSnapshot(output.context[0])
-    assert.equal(data.workflow.objective, "Preserve semantic orchestration continuity.")
+    assert.equal(
+      data.workflow.current.definition.objective,
+      "Preserve semantic orchestration continuity."
+    )
+    assert.equal(data.workflow.current.version, 1)
+    assert.deepEqual(data.workflow.current.definition.steps[1].dependsOn, [
+      "inspect",
+    ])
+    assert.deepEqual(
+      data.workflow.current.definition.steps[0].jobs[0].writeFiles,
+      ["src/**", "test/compaction-snapshot.test.js"]
+    )
+    assert.deepEqual(
+      data.workflow.current.runtime.jobs["inspect bounded worker state"].worker
+        .write_grants,
+      ["docs/approved.md"]
+    )
+    assert.deepEqual(
+      data.workflow.current.runtime.jobs["inspect bounded worker state"].worker
+        .pending_write_permission,
+      { paths: ["docs/approved.md"], tool: "apply_patch" }
+    )
     assert.equal(data.workers[0].job, "inspect bounded worker state")
     assert.equal(data.workers[0].turns[0].tool_outputs[0].tool_number, 1)
     assert.doesNotMatch(JSON.stringify(data), INTERNAL_PATTERN)

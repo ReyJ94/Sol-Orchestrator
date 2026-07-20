@@ -15,7 +15,7 @@ import {
   WorkflowStepSchema,
 } from "./schema/workflow.js";
 import { normalizeWorkflowDefinition } from "./workflow-graph.js";
-import { projectWorkflowStatus } from "./workflow-projection.js";
+import { projectCanonicalWorkflowStatus } from "./workflow-projection.js";
 import type {
   WorkflowRecord,
   WorkflowState,
@@ -32,7 +32,11 @@ const WorkflowStartInputSchema = z
   })
   .strict();
 
-const WorkflowStatusInputSchema = z.object({}).strict();
+const WorkflowStatusInputSchema = z
+  .object({
+    version: z.int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict();
 
 const WorkflowCompleteInputSchema = z
   .object({
@@ -208,14 +212,15 @@ export class WorkflowToolService {
   }
 
   async status(input: unknown, context: unknown) {
-    WorkflowStatusInputSchema.parse(input);
+    const parsed = WorkflowStatusInputSchema.parse(input);
     const parsedContext = this.#context(context);
     await this.#refreshWorkers?.(parsedContext.parent_session_id);
     await this.#dispatchReadyWorkers(parsedContext);
-    return projectWorkflowStatus(
+    return projectCanonicalWorkflowStatus(
       await this.#store.readRoot(),
       parsedContext,
-      this.#availableWorkers()
+      this.#availableWorkers(),
+      parsed.version
     );
   }
 
@@ -503,7 +508,7 @@ export const createWorkflowToolDefinitions = (
   workflow_status: tool({
     args: WorkflowStatusInputSchema.shape,
     description:
-      "Show the current semantic workflow projection, available worker profiles, and every currently available semantic action without internal IDs or worker content bodies.",
+      "Show the current semantic workflow projection, concise version summaries, available worker profiles, and every currently available semantic action. Pass one prior version number to retrieve that prior semantic definition without internal IDs or worker content bodies.",
     async execute(args, context) {
       return toolResult(await service.status(args, toolContext(context)));
     },

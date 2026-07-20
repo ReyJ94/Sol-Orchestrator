@@ -6,6 +6,7 @@ import type {
   WorkerTurnRecord,
 } from "./schema/orchestration.js";
 import { isCoalescibleDeliveryState } from "./schema/orchestration.js";
+import type { WorkflowDefinition } from "./schema/workflow.js";
 import type { WorkflowRecord } from "./workflow-state.js";
 import { WorkflowState } from "./workflow-state.js";
 
@@ -25,9 +26,16 @@ export type AvailableAction = {
 export type ProjectedTurn = ReturnType<typeof projectTurn>;
 export type ProjectedWorker = ReturnType<typeof projectWorker>;
 export type ProjectedWorkflow = ReturnType<typeof projectWorkflow>;
+export type ProjectedCurrentWorkflow = ReturnType<
+  typeof projectCurrentWorkflow
+>;
 export type WorkflowStatusProjection = ReturnType<typeof projectWorkflowStatus>;
+export type CanonicalWorkflowStatusProjection = ReturnType<
+  typeof projectCanonicalWorkflowStatus
+>;
 
 type TurnDetail = "all" | "latest" | "none";
+const MAX_WORKFLOW_VERSION_SUMMARIES = 5;
 
 export const workflowStartAvailableAction = Object.freeze({
   args: {},
@@ -471,6 +479,179 @@ export const projectWorkflow = (
   };
 };
 
+const currentWorkflowFor = (
+  root: RootSnapshot,
+  context: {
+    readonly agent: string;
+    readonly parent_session_id: string;
+  }
+): WorkflowRecord | undefined =>
+  root.workflows.workflows.find(
+    (record) =>
+      record.current &&
+      record.parent_session_id === context.parent_session_id &&
+      record.orchestrator_agent_id === context.agent
+  );
+
+type CurrentWorkflowRuntime = {
+  readonly jobs: Readonly<
+    Record<
+      string,
+      {
+        readonly result_available: boolean;
+        readonly state: string;
+        readonly status_message?: string;
+        readonly worker?: Omit<
+          ProjectedWorker,
+          "job" | "mode" | "profile" | "writeFiles"
+        >;
+      }
+    >
+  >;
+  readonly state: string;
+  readonly steps: Readonly<Record<string, { readonly state: string }>>;
+};
+
+export type CurrentWorkflowProjection = {
+  readonly definition: WorkflowDefinition;
+  readonly prior_version?: WorkflowVersionProjection;
+  readonly replacement_reason?: string;
+  readonly runtime: CurrentWorkflowRuntime;
+  readonly version: number;
+  readonly versions: readonly WorkflowVersionSummary[];
+};
+
+export type WorkflowVersionSummary = {
+  readonly replacement_reason?: string;
+  readonly version: number;
+};
+
+export type WorkflowVersionProjection = WorkflowVersionSummary & {
+  readonly definition: WorkflowDefinition;
+};
+
+const projectWorkflowVersionSummary = (
+  version: WorkflowRecord["versions"][number]
+): WorkflowVersionSummary => ({
+  version: version.version,
+  ...(version.replacement_reason === undefined
+    ? {}
+    : { replacement_reason: version.replacement_reason }),
+});
+
+const projectPriorWorkflowVersion = (
+  record: WorkflowRecord,
+  requestedVersion: number
+): WorkflowVersionProjection => {
+  if (requestedVersion >= record.current_version) {
+    throw new Error(
+      `Workflow version ${requestedVersion} is not prior to the current version. Call workflow_status({}) for the current definition.`
+    );
+  }
+  const version = record.versions.find(
+    (candidate) => candidate.version === requestedVersion
+  );
+  if (version === undefined) {
+    throw new Error(
+      `Workflow version ${requestedVersion} is unavailable. Call workflow_status({}) for the current version summaries.`
+    );
+  }
+  return {
+    definition: version.definition,
+    ...projectWorkflowVersionSummary(version),
+  };
+};
+
+const projectCurrentWorkerRuntime = (
+  root: RootSnapshot,
+  worker: WorkerBindingRecord,
+  detail: TurnDetail
+) => {
+  const projected = projectWorker(root, worker, detail);
+  return {
+    diff_available: projected.diff_available,
+    latest_event: projected.latest_event,
+    live_state: projected.live_state,
+    ...(projected.pending_write_permission === undefined
+      ? {}
+      : { pending_write_permission: projected.pending_write_permission }),
+    result_available: projected.result_available,
+    tool_output_available: projected.tool_output_available,
+    turn_count: projected.turn_count,
+    turns: projected.turns,
+    write_grants: projected.write_grants,
+  };
+};
+
+export const projectCurrentWorkflow = (
+  root: RootSnapshot,
+  record: WorkflowRecord,
+  detail: TurnDetail = "latest"
+): CurrentWorkflowProjection => {
+  const workflow = WorkflowState.restore(root.workflows);
+  const version = record.versions.find(
+    (candidate) => candidate.version === record.current_version
+  );
+  if (version === undefined) {
+    throw new Error("Current workflow version is unavailable.");
+  }
+  const jobs = Object.fromEntries(
+    version.definition.steps.flatMap((step) =>
+      step.jobs.map((job) => {
+        const runtime = version.job_states[job.name];
+        if (runtime === undefined) {
+          throw new Error(`Runtime for job ${job.name} is unavailable.`);
+        }
+        const worker =
+          runtime.task_id === undefined
+            ? undefined
+            : root.workers.find(
+                (candidate) => candidate.task_id === runtime.task_id
+              );
+        return [
+          job.name,
+          {
+            result_available: runtime.result_available,
+            state: runtime.state,
+            ...(runtime.latest_message === undefined
+              ? {}
+              : { status_message: runtime.latest_message }),
+            ...(worker === undefined
+              ? {}
+              : { worker: projectCurrentWorkerRuntime(root, worker, detail) }),
+          },
+        ];
+      })
+    )
+  );
+  const steps = Object.fromEntries(
+    version.definition.steps.map((step) => [
+      step.name,
+      {
+        state: workflow.stepState({
+          step: step.name,
+          workflow_id: record.workflow_id,
+        }),
+      },
+    ])
+  );
+  return {
+    definition: version.definition,
+    runtime: {
+      jobs,
+      state: workflow.workflowState(record.workflow_id),
+      steps,
+    },
+    version: record.current_version,
+    versions: record.versions
+      .slice(-MAX_WORKFLOW_VERSION_SUMMARIES)
+      .map(projectWorkflowVersionSummary),
+    ...(version.replacement_reason === undefined
+      ? {}
+      : { replacement_reason: version.replacement_reason }),
+  };
+};
+
 export const projectWorkflowSummary = (
   root: RootSnapshot,
   record: WorkflowRecord,
@@ -500,12 +681,7 @@ export const projectWorkflowStatus = (
       record.orchestrator_agent_id === context.agent &&
       (record.status === "active" || record.status === "blocked")
   );
-  const current = root.workflows.workflows.find(
-    (record) =>
-      record.current &&
-      record.parent_session_id === context.parent_session_id &&
-      record.orchestrator_agent_id === context.agent
-  );
+  const current = currentWorkflowFor(root, context);
   const projectedGoal =
     goal === undefined
       ? null
@@ -563,5 +739,35 @@ export const projectWorkflowStatus = (
     goal: projectedGoal,
     routing_guidance:
       "Choose the least expensive worker profile that safely fits one bounded authored job.",
+  };
+};
+
+export const projectCanonicalWorkflowStatus = (
+  root: RootSnapshot,
+  context: {
+    readonly agent: string;
+    readonly parent_session_id: string;
+  },
+  availableWorkers: readonly WorkerProfileDescriptor[] = bundledWorkerProfiles,
+  priorVersion?: number
+) => {
+  const status = projectWorkflowStatus(root, context, availableWorkers);
+  const current = currentWorkflowFor(root, context);
+  return {
+    ...status,
+    current:
+      current === undefined
+        ? null
+        : {
+            ...projectCurrentWorkflow(root, current),
+            ...(priorVersion === undefined
+              ? {}
+              : {
+                  prior_version: projectPriorWorkflowVersion(
+                    current,
+                    priorVersion
+                  ),
+                }),
+          },
   };
 };

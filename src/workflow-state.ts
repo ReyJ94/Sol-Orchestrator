@@ -103,8 +103,11 @@ export class WorkflowState {
     readonly workflow_id: string;
   }): WorkflowRecord {
     if (
-      this.currentFor(input.parent_session_id, input.orchestrator_agent_id) !==
-      undefined
+      this.#workflows.some(
+        (candidate) =>
+          candidate.current &&
+          candidate.parent_session_id === input.parent_session_id
+      )
     ) {
       throw new Error(
         "An unfinished workflow is already current for this parent session."

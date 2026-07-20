@@ -20,50 +20,69 @@ const workflow = ({
   resultAvailable = false,
   statusMessage,
   availableActions = [],
+  versions = [{ version: 2 }],
 } = {}) => ({
   available_actions: availableActions,
-  objective: "Ship the simplified orchestration pipeline.",
-  state,
-  steps: [
-    {
-      jobs: [
+  current: {
+    definition: {
+      objective: "Ship the simplified orchestration pipeline.",
+      steps: [
         {
-          actor: { profile: "luna-medium", type: "worker" },
-          latest_event: latestEvent,
-          live_state: liveState,
-          mode: "verification",
-          name: "verify simplified boundary",
-          objective: "Verify the final public seam.",
+          dependsOn: [],
+          jobs: [
+            {
+              actor: { profile: "luna-medium", type: "worker" },
+              dependsOn: [],
+              mode: "verification",
+              name: "verify simplified boundary",
+              objective: "Verify the final public seam.",
+            },
+          ],
+          name: "verify",
+          objective: "Prove the final projection.",
+        },
+      ],
+    },
+    runtime: {
+      jobs: {
+        "verify simplified boundary": {
           result_available: resultAvailable,
           state: jobState,
           status_message: statusMessage,
-          turns:
-            liveState === "review"
-              ? [
-                  {
-                    files: [
-                      {
-                        additions: 3,
-                        deletions: 1,
-                        path: "src/tui.tsx",
-                        status: "modified",
-                      },
-                    ],
-                    isolated: true,
-                    result_available: true,
-                    turn: 1,
-                    undo_available: true,
-                  },
-                ]
-              : [],
+          worker: {
+            latest_event: latestEvent,
+            live_state: liveState,
+            result_available: resultAvailable,
+            turns:
+              liveState === "review"
+                ? [
+                    {
+                      files: [
+                        {
+                          additions: 3,
+                          deletions: 1,
+                          path: "src/tui.tsx",
+                          status: "modified",
+                        },
+                      ],
+                      isolated: true,
+                      result_available: true,
+                      turn: 1,
+                      undo_available: true,
+                    },
+                  ]
+                : [],
+            write_grants: [],
+          },
         },
-      ],
-      name: "verify",
-      objective: "Prove the final projection.",
+      },
       state,
+      steps: { verify: { state } },
     },
-  ],
-  version: 2,
+    version: 2,
+    versions,
+  },
+  goal: undefined,
 });
 
 const goalBetweenWorkflows = () => ({
@@ -78,10 +97,7 @@ const goalBetweenWorkflows = () => ({
     objective: "Deliver the full outcome across bounded workflows.",
     status: "active",
   },
-  objective: "Deliver the full outcome across bounded workflows.",
-  state: "active",
-  steps: [],
-  version: null,
+  current: null,
 });
 
 function createApi({ children = [], readError, statuses = {} } = {}) {
@@ -210,7 +226,7 @@ test("shows the exact workflow_start call when no workflow exists", async () => 
   );
 });
 
-test("renders a worker automatically launched by the active graph", async () => {
+test("renders the current canonical definition with runtime state and dependencies", async () => {
   const harness = createApi();
   await createSolOrchestratorTuiPlugin({
     readWorkflow: async () => workflow(),
@@ -230,6 +246,8 @@ test("renders a worker automatically launched by the active graph", async () => 
   expect(dialog.props.options[1].description).toContain(
     "luna-medium · verification"
   );
+  expect(dialog.props.options[0].description).toContain("depends on: none");
+  expect(dialog.props.options[1].description).toContain("depends on: none");
 });
 
 test("renders the durable goal while Sol is between workflows", async () => {
@@ -319,7 +337,7 @@ test("renders review metadata, targeted inspection, acceptance, and undo availab
   );
 });
 
-test("renders completed workflow history without inventing another action", async () => {
+test("renders completed workflow version metadata without inventing another action", async () => {
   const harness = createApi();
   await createSolOrchestratorTuiPlugin({
     readWorkflow: async () =>
@@ -327,6 +345,12 @@ test("renders completed workflow history without inventing another action", asyn
         jobState: "completed",
         availableActions: [],
         state: "completed",
+        versions: [
+          {
+            replacement_reason: "The original evidence was disproven.",
+            version: 2,
+          },
+        ],
       }),
   })(harness.api);
   const app = await renderControl(harness);
@@ -339,4 +363,11 @@ test("renders completed workflow history without inventing another action", asyn
       option.title.startsWith("Available ·")
     )
   ).toBe(false);
+  expect(harness.dialogs[0].props.options).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        title: "Replacement · v2 · The original evidence was disproven.",
+      }),
+    ])
+  );
 });

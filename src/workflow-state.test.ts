@@ -6,6 +6,7 @@ import { WorkflowState } from "./workflow-state.js";
 
 const timestamp = "2026-07-17T00:00:00.000Z";
 const activeWorkerPattern = /interrupt|active worker/i;
+const currentParentPattern = /current.*parent|parent.*current/i;
 const retryablePattern = /review|blocked/i;
 
 const required = <Value>(value: Value | undefined, message: string): Value => {
@@ -170,6 +171,20 @@ const finishChange = (state: WorkflowState): void => {
 };
 
 describe("WorkflowState scheduling and derived state", () => {
+  test("rejects a second current workflow for the same parent before root validation", () => {
+    const state = new WorkflowState({ now: () => timestamp });
+    start(state);
+
+    expect(() =>
+      state.start({
+        definition: definition(),
+        orchestrator_agent_id: "another-sol",
+        parent_session_id: "parent-1",
+        workflow_id: "workflow-2",
+      })
+    ).toThrow(currentParentPattern);
+  });
+
   test("activates dependency-ready Sol jobs and leaves workers ready concurrently", () => {
     const state = new WorkflowState({ now: () => timestamp });
     start(state);
