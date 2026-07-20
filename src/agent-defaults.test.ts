@@ -22,8 +22,12 @@ const STOP_AT_DELIVERABLE_PATTERN =
   /stop when the requested evidence or output and its verification are complete/iu;
 const DRIFT_SUPERVISION_PATTERN =
   /many completed tools with no progress or result|reopening settled decisions/u;
-const NON_DUPLICATE_VERIFICATION_PATTERN =
-  /accept credible scoped worker verification as evidence.*do not rerun identical checks solely to confirm accepted work.*new integration risk, evidence conflicts, or the final repository gate/iu;
+const ACCEPTANCE_CLOSES_OBLIGATION_PATTERN =
+  /accepted worker result as completion of that delegated obligation.*move to the next genuinely unresolved obligation.*do not launch another worker, rerun the same command, re-inspect equivalent evidence, or independently reproduce the result merely for reassurance/iu;
+const REVERIFICATION_EXCEPTION_PATTERN =
+  /re-open or re-verify accepted work only when later integration creates a new risk, evidence is conflicting or materially incomplete, or the user's contract explicitly requires an independent verification that has not already been satisfied/iu;
+const COST_PROPORTIONALITY_PATTERN =
+  /every delegation, inspection, and verification must be decision-relevant and justify its token, tool, and latency cost.*if it cannot change the next decision, do not do it/iu;
 const SOL_SKILL_FIRST_PATTERN =
   /load applicable skills before substantive graph design.*shape the problem-specific method/iu;
 const SKILL_DIRECTED_GRAPH_PATTERN =
@@ -182,7 +186,9 @@ test("assigns control-plane judgment to Sol and bounded execution to workers", a
   expect(sol).toMatch(TOPOLOGY_DISCOVERY_PATTERN);
   expect(sol).toMatch(DELEGATION_DEFAULT_PATTERN);
   expect(sol).toMatch(NO_DUPLICATE_DELEGATION_PATTERN);
-  expect(sol).toMatch(NON_DUPLICATE_VERIFICATION_PATTERN);
+  expect(sol).toMatch(ACCEPTANCE_CLOSES_OBLIGATION_PATTERN);
+  expect(sol).toMatch(REVERIFICATION_EXCEPTION_PATTERN);
+  expect(sol).toMatch(COST_PROPORTIONALITY_PATTERN);
   expect(worker).toMatch(WORKER_EXECUTION_ARM_PATTERN);
   expect(worker).toMatch(MODE_STOP_PATTERN);
   expect(worker).toMatch(EVIDENCE_BOUNDARY_PATTERN);
