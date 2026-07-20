@@ -6,6 +6,7 @@ type AgentDefinition = {
   readonly description: string;
   readonly mode: "primary" | "subagent";
   readonly permission: Record<string, unknown>;
+  readonly prompt?: string;
   readonly steps?: number;
 };
 type AgentWithPrompt = AgentDefinition & { readonly prompt: string };
@@ -110,24 +111,33 @@ export const mergeAgentDefinition = (
     return userAgent;
   }
   const merged: Record<string, unknown> = { ...defaultAgent, ...userAgent };
-  if (isRecord(defaultAgent.permission) && isRecord(userAgent.permission)) {
+  merged.mode = defaultAgent.mode;
+  if (defaultAgent.steps !== undefined) {
+    merged.steps = defaultAgent.steps;
+  }
+  if (isRecord(defaultAgent.permission)) {
+    const userPermission = isRecord(userAgent.permission)
+      ? userAgent.permission
+      : {};
     merged.permission = {
+      ...userPermission,
       ...defaultAgent.permission,
-      ...userAgent.permission,
       ...(isRecord(defaultAgent.permission.task) &&
-      isRecord(userAgent.permission.task)
+      isRecord(userPermission.task)
         ? {
             task: {
+              ...userPermission.task,
               ...defaultAgent.permission.task,
-              ...userAgent.permission.task,
             },
           }
         : {}),
-      ...(defaultAgent.mode === "subagent" &&
-      defaultAgent.permission.edit === "ask"
-        ? { edit: "ask" }
-        : {}),
     };
+  }
+  if (defaultAgent.prompt !== undefined) {
+    merged.prompt =
+      typeof userAgent.prompt === "string"
+        ? `${userAgent.prompt}\n\n${defaultAgent.prompt}`
+        : defaultAgent.prompt;
   }
   return merged;
 };

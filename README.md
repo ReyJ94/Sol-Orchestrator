@@ -161,6 +161,17 @@ own OpenCode subagent profiles. Each profile keeps its own model, reasoning
 settings, and routing description; Sol Orchestrator discovers the profiles you
 configure instead of hardcoding provider models.
 
+### Customizing bundled agents
+
+With the default `registerAgents: true`, configuration for the bundled `sol`
+and worker profile names can customize their model, variant, description,
+prompt/persona, and ordinary tool capabilities. Sol Orchestrator appends its
+versioned harness contract after a custom prompt and keeps its required mode,
+limits, and orchestration permissions authoritative. Set `registerAgents: false`
+to opt out of bundled registration entirely and provide fully custom agents.
+Keep custom prompts focused on persona or worldview rather than copying the
+plugin's harness mechanics.
+
 ## Context stays useful
 
 Long worker sessions do not spill into Sol's conversation. Sol first sees

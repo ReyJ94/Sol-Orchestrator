@@ -22,6 +22,8 @@ const STOP_AT_DELIVERABLE_PATTERN =
   /stop when the requested evidence or output and its verification are complete/iu;
 const DRIFT_SUPERVISION_PATTERN =
   /many completed tools with no progress or result|reopening settled decisions/u;
+const NON_DUPLICATE_VERIFICATION_PATTERN =
+  /accept credible scoped worker verification as evidence.*do not rerun identical checks solely to confirm accepted work.*new integration risk, evidence conflicts, or the final repository gate/iu;
 const SOL_SKILL_FIRST_PATTERN =
   /load applicable skills before substantive graph design.*shape the problem-specific method/iu;
 const SKILL_DIRECTED_GRAPH_PATTERN =
@@ -52,6 +54,8 @@ const EVIDENCE_BOUNDARY_PATTERN =
   /unrestricted read capability is not authority to expand the evidence surface.*honor explicit evidence and file boundaries/iu;
 const MISSING_DECISION_BLOCKER_PATTERN =
   /architecture, scope, ownership, or product policy.*not already decided.*report a blocker and stop/iu;
+const HARNESS_CONTRACT_PATTERN =
+  /Sol Orchestrator Harness Contract v1.*required.*last-authoritative/iu;
 
 test("loads every worker profile from one shared prompt source", async () => {
   const sharedURL = new URL("../agents/worker.md", import.meta.url);
@@ -125,6 +129,8 @@ test("keeps harness mechanics in prompts and development methodology in applicab
   expect(sol).toContain("least expensive profile");
   expect(sol).toContain("creates, scopes, binds, and prompts that worker");
   expect(sol).toContain("include a revised objective");
+  expect(sol).toMatch(HARNESS_CONTRACT_PATTERN);
+  expect(worker).toMatch(HARNESS_CONTRACT_PATTERN);
   expect(sol).toMatch(TOOL_SCHEMA_OWNERSHIP_PATTERN);
   expect(sol).not.toMatch(EXHAUSTIVE_TOOL_CATALOG_PATTERN);
   expect(sol).not.toContain("required_next_action");
@@ -176,6 +182,7 @@ test("assigns control-plane judgment to Sol and bounded execution to workers", a
   expect(sol).toMatch(TOPOLOGY_DISCOVERY_PATTERN);
   expect(sol).toMatch(DELEGATION_DEFAULT_PATTERN);
   expect(sol).toMatch(NO_DUPLICATE_DELEGATION_PATTERN);
+  expect(sol).toMatch(NON_DUPLICATE_VERIFICATION_PATTERN);
   expect(worker).toMatch(WORKER_EXECUTION_ARM_PATTERN);
   expect(worker).toMatch(MODE_STOP_PATTERN);
   expect(worker).toMatch(EVIDENCE_BOUNDARY_PATTERN);
@@ -217,11 +224,10 @@ describe("managed worker permission bootstrap", () => {
     }
   });
 
-  test("preserves user prompt, model, variant, and ordinary capability permissions", () => {
+  test("preserves user model, variant, and ordinary capability permissions", () => {
     const merged = mergeAgentDefinition(agentDefinitions["luna-medium"], {
       model: "openai/gpt-5.6-terra",
       variant: "high",
-      prompt: "User-provided worker instructions.",
       permission: {
         edit: "allow",
         skill: "allow",
@@ -232,11 +238,84 @@ describe("managed worker permission bootstrap", () => {
     expect(merged).toMatchObject({
       model: "openai/gpt-5.6-terra",
       variant: "high",
-      prompt: "User-provided worker instructions.",
       permission: {
         edit: "ask",
         skill: "allow",
         webfetch: "allow",
+      },
+    });
+  });
+
+  test("keeps a user worldview before the required, last-authoritative worker harness", async () => {
+    const agents = await defaultAgents();
+    const harness = agents["luna-medium"];
+    if (harness === undefined) {
+      throw new Error("Expected generated luna-medium harness.");
+    }
+
+    const userPrompt = "You are a patient reviewer who favors small changes.";
+    const merged = mergeAgentDefinition(harness, {
+      description: "My customized worker",
+      model: "openai/gpt-5.6-terra",
+      variant: "high",
+      prompt: userPrompt,
+      permission: {
+        "agents_*": "allow",
+        edit: "allow",
+        skill: "allow",
+        webfetch: "allow",
+        workflow_start: "allow",
+      },
+    });
+
+    expect(merged).toMatchObject({
+      description: "My customized worker",
+      model: "openai/gpt-5.6-terra",
+      mode: "subagent",
+      steps: 48,
+      variant: "high",
+      permission: {
+        "agents_*": "deny",
+        edit: "ask",
+        skill: "allow",
+        webfetch: "allow",
+        workflow_start: "deny",
+      },
+    });
+    expect(merged).toHaveProperty("prompt");
+    const prompt = (merged as { prompt: string }).prompt;
+    expect(prompt).toContain(userPrompt);
+    expect(prompt).toContain(harness.prompt);
+    expect(prompt.indexOf(userPrompt)).toBeLessThan(
+      prompt.indexOf(harness.prompt)
+    );
+    expect(prompt).toMatch(HARNESS_CONTRACT_PATTERN);
+  });
+
+  test("keeps Sol's harness permissions authoritative while allowing ordinary capabilities", async () => {
+    const agents = await defaultAgents();
+    const sol = agents.sol;
+    if (sol === undefined) {
+      throw new Error("Expected generated Sol harness.");
+    }
+
+    const merged = mergeAgentDefinition(sol, {
+      permission: {
+        "agents_*": "deny",
+        goal_complete: "deny",
+        task: "allow",
+        webfetch: "allow",
+        workflow_start: "deny",
+      },
+    });
+
+    expect(merged).toMatchObject({
+      permission: {
+        "agents_*": "allow",
+        goal_complete: "allow",
+        task: "deny",
+        webfetch: "allow",
+        workflow_start: "allow",
       },
     });
   });
