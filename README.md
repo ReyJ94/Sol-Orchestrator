@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>Durable multi-agent orchestration for OpenCode.</strong><br />
+  <strong>Graph-native multi-agent orchestration for OpenCode.</strong><br />
   One lead agent owns the goal, delegates bounded work, supervises execution,
   and remains responsible for the outcome.
 </p>
@@ -24,6 +24,9 @@ without making you manage a swarm. Sol keeps the objective, architecture,
 tradeoffs, and final judgment. Workers extend its reach where parallel or
 specialized effort is useful. Their work returns for review—it does not silently
 become truth.
+
+The graph is the execution contract: it makes ownership, dependencies,
+parallelism, review, and the legal next action explicit.
 
 ## Install
 

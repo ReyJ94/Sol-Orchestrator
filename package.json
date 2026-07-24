@@ -1,7 +1,7 @@
 {
   "name": "opencode-sol-orchestrator",
   "version": "0.3.0",
-  "description": "Durable multi-agent orchestration for OpenCode: one lead agent owns the goal, delegates bounded work, supervises execution, and verifies the outcome.",
+  "description": "Graph-native multi-agent orchestration for OpenCode: one lead agent owns the goal, delegates bounded work, supervises execution, and verifies the outcome.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ReyJ94/Sol-Orchestrator.git"
