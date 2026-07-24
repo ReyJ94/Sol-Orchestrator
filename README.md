@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ReyJ94/Sol-Orchestrator/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ReyJ94/Sol-Orchestrator?style=flat-square&color=E6A34D" /></a>
+  <a href="https://github.com/ReyJ94/Sol-Orchestrator/releases/tag/v0.3.0"><img alt="Release v0.3.0" src="https://img.shields.io/badge/release-v0.3.0-E6A34D?style=flat-square" /></a>
   <img alt="OpenCode 1.18.1 or newer" src="https://img.shields.io/badge/OpenCode-%E2%89%A51.18.1-8AA4C2?style=flat-square" />
   <img alt="Bun 1.3.14 or newer" src="https://img.shields.io/badge/Bun-%E2%89%A51.3.14-8AA4C2?style=flat-square" />
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-E6A34D?style=flat-square" /></a>
