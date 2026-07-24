@@ -1,7 +1,7 @@
 {
   "name": "opencode-sol-orchestrator",
   "version": "0.3.0",
-  "description": "Graph-native multi-agent orchestration for OpenCode with durable goals, workflow DAGs, active supervision, and profile-based delegation.",
+  "description": "Durable multi-agent orchestration for OpenCode: one lead agent owns the goal, delegates bounded work, supervises execution, and verifies the outcome.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ReyJ94/Sol-Orchestrator.git"
@@ -11,7 +11,7 @@
     "url": "https://github.com/ReyJ94/Sol-Orchestrator/issues"
   },
   "license": "MIT",
-  "author": "reyj94",
+  "author": "ReyJ94",
   "type": "module",
   "exports": {
     "./server": {
@@ -48,8 +48,7 @@
     "check": "turbo run lint:local typecheck:local test:local",
     "build": "turbo run build:local",
     "build:local": "bun run scripts/build.ts && tsc --project tsconfig.build.json",
-    "pack:dry-run": "bun pm pack --dry-run",
-    "prepack": "bun run build:local"
+    "pack:dry-run": "bun pm pack --dry-run"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.18.2",
