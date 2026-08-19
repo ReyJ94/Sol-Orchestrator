@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ToolContext } from "@opencode-ai/plugin";
+import type { ToolContext } from "@opencode-ai/plugin/v1";
 import { z } from "zod";
 
 import type {
