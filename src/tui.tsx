@@ -1,11 +1,11 @@
 /** @jsxImportSource @opentui/solid */
 
-import type { PluginOptions } from "@opencode-ai/plugin";
+import type { PluginOptions } from "@opencode-ai/plugin/v1";
 import type {
   TuiPlugin,
   TuiPluginApi,
   TuiPluginModule,
-} from "@opencode-ai/plugin/tui";
+} from "@opencode-ai/plugin/v1/tui";
 import type { Session, SessionStatus } from "@opencode-ai/sdk/v2";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
@@ -497,10 +497,10 @@ export const createSolOrchestratorTuiPlugin =
       };
       const offEvents = [
         api.event.on("session.created", refreshSafely),
-        api.event.on("session.updated", refreshSafely),
+        api.event.on("session.status", refreshSafely),
         api.event.on("session.deleted", refreshSafely),
-        api.event.on("message.updated", refreshSafely),
-        api.event.on("message.part.updated", refreshSafely),
+        api.event.on("session.step.started", refreshSafely),
+        api.event.on("session.step.ended", refreshSafely),
       ];
       onMount(refreshSafely);
       onCleanup(() => {

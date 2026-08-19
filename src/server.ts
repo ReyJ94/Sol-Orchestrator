@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
+import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin/v1";
+import { tool } from "@opencode-ai/plugin/v1";
 import { Glob } from "bun";
 
 import {

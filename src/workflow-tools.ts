@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin/v1";
 import { z } from "zod";
 import { bundledWorkerProfiles } from "./agent-defaults.js";
 import type { GoalState } from "./goal-state.js";
