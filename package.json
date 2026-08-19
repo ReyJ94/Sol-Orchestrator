@@ -1,6 +1,6 @@
 {
   "name": "opencode-sol-orchestrator",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Graph-native multi-agent orchestration for OpenCode: one lead agent owns the goal, delegates bounded work, supervises execution, and verifies the outcome.",
   "repository": {
     "type": "git",
@@ -65,8 +65,7 @@
     "ultracite": "7.8.1"
   },
   "engines": {
-    "bun": ">=1.3.14",
-    "opencode": ">=1.18.1"
+    "bun": ">=1.3.14"
   },
   "publishConfig": {
     "access": "public"

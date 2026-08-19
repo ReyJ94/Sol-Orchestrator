@@ -147,8 +147,8 @@ surfaces:
 - **Subagents.** Workers managed by Sol, their state, and the relevant
   controls.
 - **Goal & Workflow.** The durable objective, graph version, steps, jobs,
-  actors, review state, blockers, changed files, progress, and what's
-  available to do right now.
+  actors, review state, blockers, changed files, progress, and the
+  actions available now.
 
 Internal correlation IDs stay out of the way. The interface uses the semantic
 names Sol gave the work.
