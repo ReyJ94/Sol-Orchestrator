@@ -1,7 +1,7 @@
 {
   "name": "opencode-sol-orchestrator",
-  "version": "0.4.1",
-  "description": "Graph-native multi-agent orchestration for OpenCode: one lead agent owns the goal, delegates bounded work, supervises execution, and verifies the outcome.",
+  "version": "0.5.0",
+  "description": "Deterministic, supervise-by-default multi-agent orchestration for OpenCode.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ReyJ94/Sol-Orchestrator.git"
@@ -10,24 +10,37 @@
   "bugs": {
     "url": "https://github.com/ReyJ94/Sol-Orchestrator/issues"
   },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "orchestrator",
+    "multi-agent",
+    "agentic-coding"
+  ],
   "license": "MIT",
   "author": "ReyJ94",
   "type": "module",
   "exports": {
+    ".": {
+      "import": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    },
     "./server": {
-      "types": "./dist/server.d.ts",
-      "import": "./dist/server.js"
+      "import": "./dist/server.js",
+      "types": "./dist/server.d.ts"
     },
     "./compaction-snapshot": {
-      "types": "./dist/compaction-snapshot.d.ts",
-      "import": "./dist/compaction-snapshot.js"
+      "import": "./dist/compaction-snapshot.js",
+      "types": "./dist/compaction-snapshot.d.ts"
     },
     "./tui": {
-      "types": "./dist/tui.d.ts",
-      "import": "./dist/tui.js"
+      "import": "./dist/tui.js",
+      "types": "./dist/tui.d.ts"
     }
   },
   "files": [
+    "server.js",
+    "tui.js",
     "dist",
     "agents",
     "assets",

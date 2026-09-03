@@ -3074,4 +3074,5 @@ export const SolOrchestratorPlugin = (
 export default {
   id: "opencode-sol-orchestrator.server",
   server: SolOrchestratorPlugin,
+  setup: async () => {},
 };
