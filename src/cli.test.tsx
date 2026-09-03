@@ -29,7 +29,7 @@ const workflow = () => ({
 function createCliApi({
   children = [{ id: "child-1", parentID: "parent", title: "Verifier" }],
   statuses = { "child-1": "running" },
-  readWorkflow = async () => null,
+  readWorkflow: _readWorkflow = async () => null,
   route = { type: "session", sessionID: "parent" },
 }: {
   children?: { id: string; parentID?: string; title?: string }[];
@@ -44,7 +44,7 @@ function createCliApi({
   const toasts: unknown[] = [];
   const eventHandlers = new Map<string, unknown[]>();
   const sessionsByID = new Map(
-    (children ?? []).map((child) => [child.id, child]),
+    (children ?? []).map((child) => [child.id, child])
   );
   if (!sessionsByID.has("parent")) {
     sessionsByID.set("parent", { id: "parent", title: "Parent" });
@@ -85,7 +85,7 @@ function createCliApi({
         dialog: {
           select: async (options: unknown) => {
             selects.push(options);
-            return undefined;
+            return;
           },
         },
         toast: { show: (toast: unknown) => toasts.push(toast) },
@@ -116,7 +116,7 @@ async function renderFooter(harness: ReturnType<typeof createCliApi>) {
   expect(claim.append).toBe("prompt.footer");
   rendered = await testRender(
     () => <box>{claim.render({ sessionID: "parent" }) as never}</box>,
-    { height: 3, width: 52 },
+    { height: 3, width: 52 }
   );
   return rendered;
 }
@@ -142,14 +142,15 @@ test("shows the subagent count and navigates to the picked child", async () => {
     commands: { id: string; run: () => Promise<void> }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.subagents",
+    (entry) => entry.id === "opencode-sol-orchestrator.subagents"
   );
   expect(command).toBeDefined();
-  (harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }).select =
-    async (options) => {
-      harness.selects.push(options);
-      return "child-1";
-    };
+  (
+    harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }
+  ).select = async (options) => {
+    harness.selects.push(options);
+    return "child-1";
+  };
   await command?.run();
   expect(harness.navigations).toEqual([
     { type: "session", sessionID: "child-1" },
@@ -169,7 +170,7 @@ test("subagents command is bound, palette-listed, and toasts when empty", async 
     }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.subagents",
+    (entry) => entry.id === "opencode-sol-orchestrator.subagents"
   );
   expect(command?.bind).toBe("<leader>o");
   expect(command?.palette).toBe(true);
@@ -188,12 +189,13 @@ test("picker failures toast instead of failing silently", async () => {
     commands: { id: string; run: () => Promise<void> }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.subagents",
+    (entry) => entry.id === "opencode-sol-orchestrator.subagents"
   );
-  (harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }).select =
-    async () => {
-      throw new Error("dialog unavailable");
-    };
+  (
+    harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }
+  ).select = async () => {
+    throw new Error("dialog unavailable");
+  };
   await command?.run();
   expect(harness.navigations).toEqual([]);
   expect(harness.toasts).toEqual([
@@ -205,23 +207,28 @@ test("navigation follows tab opening instead of returning early", async () => {
   await createSolOrchestratorCliSetup()(harness.api as never);
   await renderFooter(harness);
   const opened: unknown[] = [];
-  (harness.api.ui as { tabs: { enabled: () => boolean; open: (id: string) => boolean } }).tabs = {
+  (
+    harness.api.ui as {
+      tabs: { enabled: () => boolean; open: (id: string) => boolean };
+    }
+  ).tabs = {
     enabled: () => true,
     open: (sessionID: string) => {
       opened.push(sessionID);
       return true;
     },
   };
-  (harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }).select =
-    async (options) => {
-      harness.selects.push(options);
-      return "child-1";
-    };
+  (
+    harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }
+  ).select = async (options) => {
+    harness.selects.push(options);
+    return "child-1";
+  };
   const layer = harness.layers[0] as {
     commands: { id: string; run: () => Promise<void> }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.subagents",
+    (entry) => entry.id === "opencode-sol-orchestrator.subagents"
   );
   await command?.run();
   expect(opened).toEqual(["child-1"]);
@@ -234,13 +241,14 @@ test("unexpected picker result toasts instead of silently staying", async () => 
   const harness = createCliApi();
   await createSolOrchestratorCliSetup()(harness.api as never);
   await renderFooter(harness);
-  (harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }).select =
-    async () => ({ value: "child-1" });
+  (
+    harness.api.ui.dialog as { select: (options: never) => Promise<unknown> }
+  ).select = async () => ({ value: "child-1" });
   const layer = harness.layers[0] as {
     commands: { id: string; run: () => Promise<void> }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.subagents",
+    (entry) => entry.id === "opencode-sol-orchestrator.subagents"
   );
   await command?.run();
   expect(harness.navigations).toEqual([]);
@@ -255,7 +263,7 @@ test("shows the workflow label and opens the workflow browser", async () => {
   });
   await createSolOrchestratorCliSetup({
     readWorkflow: harness.api.data.session
-      ? (async () => workflow() as never)
+      ? async () => workflow() as never
       : undefined,
   } as never)(harness.api as never);
   const app = await renderFooter(harness);
@@ -265,7 +273,7 @@ test("shows the workflow label and opens the workflow browser", async () => {
     commands: { id: string; run: () => Promise<void> }[];
   };
   const command = layer.commands.find(
-    (entry) => entry.id === "opencode-sol-orchestrator.workflow",
+    (entry) => entry.id === "opencode-sol-orchestrator.workflow"
   );
   await command?.run();
   const dialog = harness.selects[0] as { title: string };

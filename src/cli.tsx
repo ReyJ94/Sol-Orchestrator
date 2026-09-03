@@ -6,10 +6,10 @@ import {
   defaultWorkflowSummary,
   errorMessage,
   type TuiDependencies,
+  type WorkflowSummary,
   workflowControlLabel,
   workflowDialogTitle,
   workflowOptions,
-  type WorkflowSummary,
   workflowStartHint,
 } from "./tui-shared.js";
 
@@ -34,27 +34,27 @@ export type CliContext = {
     };
   };
   readonly keymap: {
-    readonly layer: (input: () => {
-      readonly commands?: readonly {
-        readonly id?: string;
-        readonly title?: string;
-        readonly description?: string;
-        readonly group?: string;
-        readonly bind?: false | string;
-        readonly palette?: true;
-        readonly run: (
-          input?: string,
-          event?: unknown
-        ) => void | false | Promise<void>;
-      }[];
-    }) => void;
+    readonly layer: (
+      input: () => {
+        readonly commands?: readonly {
+          readonly id?: string;
+          readonly title?: string;
+          readonly description?: string;
+          readonly group?: string;
+          readonly bind?: false | string;
+          readonly palette?: true;
+          readonly run: (
+            input?: string,
+            event?: unknown
+          ) => void | false | Promise<void>;
+        }[];
+      }
+    ) => void;
   };
   readonly ui: {
     readonly slot: (claim: {
       readonly append: "prompt.footer";
-      readonly render: (input: {
-        readonly sessionID?: string;
-      }) => unknown;
+      readonly render: (input: { readonly sessionID?: string }) => unknown;
     }) => () => void;
     readonly dialog: {
       readonly select: <Value>(options: {
@@ -96,7 +96,9 @@ export type CliContext = {
   };
 };
 
-export type CliSetup = (context: CliContext) => Promise<(() => void) | void>;
+export type CliSetup = (
+  context: CliContext
+) => Promise<(() => void) | undefined> | (() => void) | undefined;
 
 const subagentsCommandId = "opencode-sol-orchestrator.subagents";
 const workflowCommandId = "opencode-sol-orchestrator.workflow";
@@ -120,14 +122,14 @@ const navigateToSession = (context: CliContext, sessionID: string): void => {
 const currentSessionID = (context: CliContext): string | undefined => {
   const route = context.ui.router.current();
   if (route.type !== "session" || !("sessionID" in route)) {
-    return undefined;
+    return;
   }
   return route.sessionID;
 };
 
 export const createSolOrchestratorCliSetup =
   (dependencies: TuiDependencies = {}): CliSetup =>
-  async (context) => {
+  (context) => {
     const readWorkflow = dependencies.readWorkflow ?? defaultWorkflowSummary;
     const pluginOptions = { ...context.options };
 
@@ -151,7 +153,11 @@ export const createSolOrchestratorCliSetup =
         });
 
     const openSubagentsPicker = async (sessionID: string) => {
-      let children;
+      let children: {
+        id: string;
+        status: "idle" | "running";
+        title: string;
+      }[] = [];
       try {
         children = listChildren(sessionID);
       } catch (error) {
@@ -175,8 +181,7 @@ export const createSolOrchestratorCliSetup =
       try {
         selected = await context.ui.dialog.select({
           options: children.map((child) => ({
-            description:
-              child.status === "running" ? "running" : "idle",
+            description: child.status === "running" ? "running" : "idle",
             title: `${childLabel(child.status)} ${child.title}`,
             value: child.id,
           })),
@@ -281,7 +286,7 @@ export const createSolOrchestratorCliSetup =
               run: () => {
                 const sessionID = currentSessionID(context);
                 if (sessionID !== undefined) {
-                  void openSubagentsPicker(sessionID);
+                  openSubagentsPicker(sessionID).catch(() => undefined);
                 }
               },
               title: "Subagents",
@@ -295,7 +300,7 @@ export const createSolOrchestratorCliSetup =
               run: () => {
                 const sessionID = currentSessionID(context);
                 if (sessionID !== undefined) {
-                  void openWorkflow(sessionID);
+                  openWorkflow(sessionID).catch(() => undefined);
                 }
               },
               title: "Goal & workflow status",

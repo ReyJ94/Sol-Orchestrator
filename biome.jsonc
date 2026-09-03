@@ -35,7 +35,7 @@
       "assist": { "enabled": false }
     },
     {
-      "includes": ["src/tui.tsx"],
+      "includes": ["src/tui.tsx", "src/cli.tsx"],
       "linter": {
         "rules": {
           "a11y": {
@@ -46,7 +46,7 @@
       }
     },
     {
-      "includes": ["tui.test.tsx"],
+      "includes": ["tui.test.tsx", "src/cli.test.tsx"],
       "linter": {
         "rules": {
           "a11y": {
@@ -63,7 +63,7 @@
       }
     },
     {
-      "includes": ["tui.test.tsx"],
+      "includes": ["tui.test.tsx", "src/cli.test.tsx"],
       "linter": {
         "rules": {
           "suspicious": {

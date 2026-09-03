@@ -1,9 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 
-import type {
-  TuiPlugin,
-  TuiPluginApi,
-} from "@opencode-ai/plugin/v1/tui";
+import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/v1/tui";
 import type { Session } from "@opencode-ai/sdk/v2";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
@@ -15,14 +12,14 @@ import {
   errorMessage,
   sessionTitle,
   type TuiDependencies,
+  type WorkflowSummary,
   workflowControlLabel,
   workflowDialogTitle,
   workflowOptions,
-  type WorkflowSummary,
   workflowStartHint,
 } from "./tui-shared.js";
 
-export type { WorkflowSummary };
+export type { WorkflowSummary } from "./tui-shared.js";
 
 const subagentsCommand = "opencode-sol-orchestrator.subagents";
 const workflowCommand = "opencode-sol-orchestrator.workflow";
