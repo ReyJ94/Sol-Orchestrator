@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/ReyJ94/Sol-Orchestrator/releases/tag/v0.5.0"><img alt="Release v0.5.0" src="https://img.shields.io/badge/release-v0.5.0-E6A34D?style=flat-square" /></a>
-  <img alt="OpenCode v2 beta" src="https://img.shields.io/badge/OpenCode-v2%20beta-8AA4C2?style=flat-square" />
+  <img alt="OpenCode v1 or v2" src="https://img.shields.io/badge/OpenCode-v1%20%7C%20v2%20beta-8AA4C2?style=flat-square" />
   <img alt="Bun 1.3.14 or newer" src="https://img.shields.io/badge/Bun-%E2%89%A51.3.14-8AA4C2?style=flat-square" />
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-E6A34D?style=flat-square" /></a>
 </p>
@@ -28,16 +28,14 @@ worker says it's done.
 The graph is the execution contract. Ownership, dependencies, parallelism,
 review, and the next legal action are all explicit, not implied.
 
-## Requires OpenCode v2
+## OpenCode Compatibility
 
-This release targets **OpenCode v2 (beta)**, currently published on npm under
-the `beta` tag. v2 moved its classic plugin API behind a `/v1` compatibility
-subpath, and this is the release that ports Sol Orchestrator to it. If you're
-still on OpenCode v1, use
-[v0.3.0](https://github.com/ReyJ94/Sol-Orchestrator/releases/tag/v0.3.0)
-instead.
+Sol Orchestrator is dual-runtime compatible with both **OpenCode v1** and **OpenCode v2**:
 
-OpenCode v2 isn't on the default install path yet. Install it explicitly:
+- **OpenCode v2**: Uses directory root entrypoints (`server.js` and `tui.js`) with native CLI integration (`SolOrchestratorCliSetup`) for subagent navigation, keymap layer management, and command palette actions.
+- **OpenCode v1**: Fully backwards-compatible with OpenCode's classic plugin hooks (`server` and `tui` exports).
+
+If you are using OpenCode v2 (beta), it can be installed via:
 
 ```sh
 pnpm add -g opencode-ai@beta
